@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#05060c" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="description" content="ORBITAL SIEGE — a realistic 2D space combat game for mobile, built with Three.js." />
+<title>ORBITAL SIEGE</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%2305060c'/%3E%3Cpolygon points='50,18 68,74 50,60 32,74' fill='%2338e6ff'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+  }
+}
+</script>
+</head>
+<body>
+  <!-- ===== Render target ===== -->
+  <canvas id="scene"></canvas>
+  <div id="vignette"></div>
+  <div id="flash"></div>
+
+  <!-- ===== HUD (in-game) ===== -->
+  <div id="hud" class="screen hidden" aria-hidden="true">
+    <div class="hud-top">
+      <div class="hud-chip"><span class="lbl">SCORE</span><span id="hudScore" class="val">0</span></div>
+      <div class="hud-chip"><span class="lbl">WAVE</span><span id="hudWave" class="val">1</span></div>
+      <div class="hud-chip"><span class="lbl">SALVAGE</span><span id="hudSalvage" class="val">0</span></div>
+      <button id="btnPause" class="icon-btn" aria-label="Pause">II</button>
+    </div>
+
+    <div class="hud-bars">
+      <div class="bar-wrap">
+        <div class="bar-label">HULL</div>
+        <div class="bar"><div id="barHull" class="bar-fill hull"></div></div>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-label">SHIELD</div>
+        <div class="bar"><div id="barShield" class="bar-fill shield"></div></div>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-label">FOCUS</div>
+        <div class="bar"><div id="barFocus" class="bar-fill focus"></div></div>
+      </div>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+    <div id="toast" class="toast-wrap"></div>
+
+    <button id="btnFocus" class="focus-btn" aria-label="Focus (bullet-time)">
+      <span class="ring"></span><span class="glyph">◈</span><span class="txt">FOCUS</span>
+    </button>
+  </div>
+
+  <!-- ===== Loading ===== -->
+  <div id="loading" class="screen center">
+    <div class="logo-wrap">
+      <div class="logo">ORBITAL<span>SIEGE</span></div>
+      <div class="tagline">DEFEND THE LAST STATION</div>
+    </div>
+    <div class="loader"><div id="loadBar" class="loader-fill"></div></div>
+    <div id="loadMsg" class="load-msg">Initializing systems…</div>
+  </div>
+
+  <!-- ===== Main Menu ===== -->
+  <div id="menu" class="screen center hidden">
+    <div class="logo-wrap big">
+      <div class="logo">ORBITAL<span>SIEGE</span></div>
+      <div class="tagline">DEFEND THE LAST STATION</div>
+    </div>
+    <div class="menu-stats">
+      <div><span class="k">BEST SCORE</span><span id="menuBest" class="v">0</span></div>
+      <div><span class="k">BEST WAVE</span><span id="menuWave" class="v">0</span></div>
+    </div>
+    <div class="menu-buttons">
+      <button id="btnPlay" class="btn primary">PLAY</button>
+      <button id="btnHow" class="btn">HOW TO PLAY</button>
+      <button id="btnSettings" class="btn">SETTINGS</button>
+    </div>
+    <div class="credit">Three.js • WebAudio • v1.0</div>
+  </div>
+
+  <!-- ===== How To Play ===== -->
+  <div id="how" class="screen center hidden">
+    <div class="panel">
+      <h2>HOW TO PLAY</h2>
+      <ul class="how-list">
+        <li><b>Fly</b> — drag anywhere on screen (or mouse / WASD on desktop).</li>
+        <li><b>Fire</b> — automatic. Just aim by moving.</li>
+        <li><b>FOCUS</b> — hold the ◈ button to slow time, raise a <b>deflector</b>
+            that destroys enemy bullets, and fire a concentrated beam. Drains the
+            Focus meter — use it in clutch moments.</li>
+        <li><b>Shield</b> regenerates when you avoid damage. <b>Hull</b> does not —
+            grab <b>Repair</b> drops.</li>
+        <li>Clear a wave, then spend <b>Salvage</b> in the Field Workshop.</li>
+        <li>Survive 12 waves &amp; 3 bosses, then go <b>Endless</b>.</li>
+      </ul>
+      <button class="btn primary close-how">GOT IT</button>
+    </div>
+  </div>
+
+  <!-- ===== Settings ===== -->
+  <div id="settings" class="screen center hidden">
+    <div class="panel">
+      <h2>SETTINGS</h2>
+      <div class="setting"><label>Master Volume</label><input id="setVol" type="range" min="0" max="100" value="80" /></div>
+      <div class="setting"><label>Music</label><input id="setMusic" type="range" min="0" max="100" value="55" /></div>
+      <div class="setting toggle"><label>Bloom / Glow</label><button id="setBloom" class="tgl on">ON</button></div>
+      <div class="setting toggle"><label>High Particles</label><button id="setParticles" class="tgl on">ON</button></div>
+      <div class="setting toggle"><label>Haptics</label><button id="setHaptics" class="tgl on">ON</button></div>
+      <button class="btn primary close-settings">DONE</button>
+    </div>
+  </div>
+
+  <!-- ===== Pause ===== -->
+  <div id="pause" class="screen center hidden">
+    <div class="panel">
+      <h2>PAUSED</h2>
+      <div class="menu-buttons">
+        <button id="btnResume" class="btn primary">RESUME</button>
+        <button id="btnPauseSettings" class="btn">SETTINGS</button>
+        <button id="btnQuit" class="btn danger">ABANDON RUN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Field Workshop (between waves) ===== -->
+  <div id="shop" class="screen center hidden">
+    <div class="panel wide">
+      <div class="shop-head">
+        <h2>FIELD WORKSHOP</h2>
+        <div class="shop-salvage">SALVAGE <span id="shopSalvage">0</span></div>
+      </div>
+      <div id="shopGrid" class="shop-grid"></div>
+      <button id="btnLaunch" class="btn primary">LAUNCH — WAVE <span id="shopNextWave">2</span></button>
+    </div>
+  </div>
+
+  <!-- ===== Game Over / Victory ===== -->
+  <div id="over" class="screen center hidden">
+    <div class="panel">
+      <h2 id="overTitle">RUN ENDED</h2>
+      <div class="over-stats">
+        <div><span class="k">SCORE</span><span id="ovScore" class="v">0</span></div>
+        <div><span class="k">WAVE</span><span id="ovWave" class="v">0</span></div>
+        <div><span class="k">KILLS</span><span id="ovKills" class="v">0</span></div>
+        <div><span class="k">BEST</span><span id="ovBest" class="v">0</span></div>
+      </div>
+      <div id="ovNew" class="new-record hidden">◆ NEW RECORD ◆</div>
+      <div class="menu-buttons">
+        <button id="btnRetry" class="btn primary">RETRY</button>
+        <button id="btnMenu" class="btn">MAIN MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== WebGL fallback ===== -->
+  <div id="nowebgl" class="screen center hidden">
+    <div class="panel">
+      <h2>UNSUPPORTED</h2>
+      <p>Your browser could not start WebGL. Try an updated Chrome, Safari, or Firefox.</p>
+    </div>
+  </div>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>
