@@ -60,10 +60,20 @@
 
   <!-- bottom-center: weapon wheel -->
   <div id="weapons">
-    <div class="wslot" data-slot="0"><span class="wkey">1</span><span class="wico">🗡️</span><span class="wname">خنجر</span></div>
-    <div class="wslot" data-slot="1"><span class="wkey">2</span><span class="wico">⚔️</span><span class="wname">سيف</span></div>
-    <div class="wslot" data-slot="2"><span class="wkey">3</span><span class="wico">🔱</span><span class="wname">رمح</span></div>
+    <div class="wslot" data-slot="0"><span class="wkey">1</span><span class="wico">👊</span><span class="wname">قبضة</span></div>
+    <div class="wslot locked" data-slot="1"><span class="wkey">2</span><span class="wico">🗡️</span><span class="wname">خنجر</span><span class="wlock">🔒</span></div>
+    <div class="wslot locked" data-slot="2"><span class="wkey">3</span><span class="wico">⚔️</span><span class="wname">سيف</span><span class="wlock">🔒</span></div>
+    <div class="wslot locked" data-slot="3"><span class="wkey">4</span><span class="wico">🔱</span><span class="wname">رمح</span><span class="wlock">🔒</span></div>
   </div>
+
+  <!-- weather indicator -->
+  <div id="weather">
+    <span class="w-mode" id="w-mode">صباح ضبابي</span>
+    <span class="w-wind" id="w-wind">🍃 <b id="w-windv">هادئ</b></span>
+  </div>
+
+  <!-- interaction prompt -->
+  <div id="prompt" class="hidden"><kbd id="prompt-key">E</kbd><span id="prompt-text">فتح المتجر</span></div>
 
   <!-- boss bar -->
   <div id="bossbar" class="hidden">
@@ -116,11 +126,13 @@
     <ul class="keys">
       <li><kbd>W A S D</kbd><span>الحركة</span></li>
       <li><kbd>الفأرة</kbd><span>النظر / التصويب</span></li>
-      <li><kbd>زر أيسر</kbd><span>هجوم</span></li>
+      <li><kbd>زر أيسر</kbd><span>هجوم · صيد بالرمح قرب الماء</span></li>
       <li><kbd>Shift</kbd><span>ركض</span></li>
       <li><kbd>Space</kbd><span>قفز</span></li>
-      <li><kbd>1 2 3</kbd><span>تبديل السلاح</span></li>
-      <li><kbd>F</kbd><span>التقاط اللوت / تفاعل</span></li>
+      <li><kbd>1 2 3 4</kbd><span>قبضة / خنجر / سيف / رمح</span></li>
+      <li><kbd>F</kbd><span>التقاط اللوت</span></li>
+      <li><kbd>E</kbd><span>المتجر (قرب القرية)</span></li>
+      <li><kbd>I / Tab</kbd><span>المحفظة</span></li>
       <li><kbd>Esc</kbd><span>إيقاف مؤقت</span></li>
     </ul>
     <button class="btn btn-back">رجوع</button>
@@ -157,6 +169,32 @@
     <p id="death-stats">صمدت في الغابة…</p>
     <button class="btn btn-primary" id="btn-respawn">إحياء</button>
     <button class="btn" id="btn-death-menu">القائمة الرئيسية</button>
+  </div>
+</div>
+
+<!-- ===================== INVENTORY (محفظة) ===================== -->
+<div id="inventory" class="hidden">
+  <div class="inv-card">
+    <div class="inv-head">
+      <h2>🎒 المحفظة</h2>
+      <span class="inv-gold">🪙 <b id="inv-gold">0</b></span>
+      <button class="inv-close" id="inv-close">✕</button>
+    </div>
+    <div class="inv-grid" id="inv-grid"></div>
+    <div class="inv-detail" id="inv-detail">اختر عنصراً لعرض تفاصيله</div>
+  </div>
+</div>
+
+<!-- ===================== SHOP (متجر القرية) ===================== -->
+<div id="shop" class="hidden">
+  <div class="shop-card">
+    <div class="inv-head">
+      <h2>🏪 تاجر القرية</h2>
+      <span class="inv-gold">🪙 <b id="shop-gold">0</b></span>
+      <button class="inv-close" id="shop-close">✕</button>
+    </div>
+    <p class="shop-sub">اشترِ الأسلحة والمؤن بالذهب الذي جمعته.</p>
+    <div class="shop-list" id="shop-list"></div>
   </div>
 </div>
 

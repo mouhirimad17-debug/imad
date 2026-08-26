@@ -179,6 +179,65 @@ canvas#scene{position:fixed; inset:0; width:100%; height:100%; display:block; z-
 .wslot .wico{font-size:26px; line-height:1}
 .wslot .wname{font-size:11px; color:#cfe6cc}
 .wslot.active{border-color:var(--gold); box-shadow:0 0 20px rgba(230,193,90,.4); transform:translateY(-6px)}
+.wslot .wlock{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-size:22px; background:rgba(4,10,6,.68); border-radius:12px}
+.wslot.locked .wico,.wslot.locked .wname{opacity:.35}
+.wslot:not(.locked) .wlock{display:none}
+
+/* weather indicator */
+#weather{position:absolute; top:132px; right:18px; display:flex; flex-direction:column; align-items:flex-end; gap:3px;
+  background:var(--glass); border:1px solid var(--stroke); border-radius:12px; padding:8px 14px; backdrop-filter:blur(4px)}
+.w-mode{font-size:14px; font-weight:800; color:#dff0ff}
+.w-wind{font-size:12px; color:#bcd6bb}
+.w-wind b{color:#9fd0e0}
+
+/* interaction prompt */
+#prompt{position:absolute; left:50%; bottom:110px; transform:translateX(-50%);
+  display:flex; align-items:center; gap:10px; background:var(--glass); border:1px solid var(--stroke);
+  border-radius:12px; padding:10px 18px; font-size:16px; color:#eafff0; backdrop-filter:blur(4px);
+  animation:fade .2s ease both}
+#prompt kbd{background:#11220f; border:1px solid var(--stroke); border-bottom-width:3px; border-radius:8px;
+  padding:4px 12px; font-weight:800; color:#bfe9c3}
+
+/* ============================ INVENTORY / SHOP ============================ */
+#inventory,#shop{position:fixed; inset:0; z-index:58; display:flex; align-items:center; justify-content:center;
+  background:rgba(4,10,6,.55); backdrop-filter:blur(8px); animation:fade .2s ease both; pointer-events:auto}
+.inv-card,.shop-card{background:linear-gradient(180deg, rgba(16,30,18,.97), rgba(8,16,10,.99));
+  border:1px solid var(--stroke); border-radius:18px; padding:22px 26px; width:min(640px,92vw);
+  box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.inv-head{display:flex; align-items:center; gap:14px; margin-bottom:16px}
+.inv-head h2{font-size:24px; flex:1}
+.inv-gold{font-size:17px; font-weight:800; color:var(--gold)}
+.inv-close{cursor:pointer; background:none; border:1px solid var(--stroke); color:var(--ink);
+  border-radius:10px; width:38px; height:38px; font-size:18px; font-family:inherit}
+.inv-close:hover{border-color:var(--blood); color:#ff9a9a}
+.inv-grid{display:grid; grid-template-columns:repeat(8,1fr); gap:8px; margin-bottom:14px}
+@media(max-width:560px){.inv-grid{grid-template-columns:repeat(5,1fr)}}
+.inv-slot{position:relative; aspect-ratio:1; border-radius:10px; background:rgba(0,0,0,.35);
+  border:1px solid var(--stroke); display:flex; align-items:center; justify-content:center; font-size:26px;
+  cursor:pointer; transition:transform .1s, border-color .2s}
+.inv-slot:hover{transform:translateY(-3px)}
+.inv-slot.empty{cursor:default; opacity:.5}
+.inv-slot .qty{position:absolute; bottom:2px; right:5px; font-size:12px; font-weight:800; color:#fff; text-shadow:0 1px 2px #000}
+.inv-slot.r-uncommon{border-color:#4caf50} .inv-slot.r-rare{border-color:#4aa3ff}
+.inv-slot.r-epic{border-color:#b06bff} .inv-slot.r-legendary{border-color:var(--gold); box-shadow:0 0 14px rgba(230,193,90,.35)}
+.inv-detail{min-height:44px; padding:10px 14px; background:rgba(0,0,0,.3); border-radius:10px;
+  border:1px solid var(--stroke); font-size:14px; color:#cfe6cc; text-align:center}
+.inv-detail b{color:#eafff0} .inv-detail .hint{color:#9fd0a4; font-size:12px}
+
+.shop-sub{color:#bcd6bb; font-size:14px; margin-bottom:14px}
+.shop-list{display:flex; flex-direction:column; gap:10px}
+.shop-item{display:flex; align-items:center; gap:14px; background:rgba(0,0,0,.3);
+  border:1px solid var(--stroke); border-radius:12px; padding:10px 16px}
+.shop-item .si-ico{font-size:28px}
+.shop-item .si-info{flex:1} .shop-item .si-name{font-weight:800; font-size:16px}
+.shop-item .si-desc{font-size:12px; color:#9fd0a4}
+.shop-item .si-buy{cursor:pointer; background:linear-gradient(180deg,#3fa34d,#1f6b34);
+  border:1px solid rgba(126,224,138,.6); color:#fff; font-family:inherit; font-weight:800;
+  padding:8px 16px; border-radius:10px; font-size:14px; white-space:nowrap}
+.shop-item .si-buy:hover{filter:brightness(1.1)}
+.shop-item .si-buy:disabled{opacity:.4; cursor:not-allowed; filter:grayscale(1)}
+.shop-item.owned .si-buy{background:#2a3a2c; border-color:var(--stroke)}
 
 /* boss bar */
 #bossbar{position:absolute; top:16px; left:50%; transform:translateX(-50%);

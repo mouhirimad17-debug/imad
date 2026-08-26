@@ -31,6 +31,7 @@ const rand  = (a = 1, b = 0) => b + Math.random() * (a - b);
 const randi = (a, b) => Math.floor(rand(a, b + 1));
 const smooth = t => t * t * (3 - 2 * t);
 const TAU = Math.PI * 2;
+const $ = id => document.getElementById(id);   // DOM helper (used across modules)
 
 // deterministic hash → [0,1)
 function hash2(x, y) {
@@ -265,6 +266,32 @@ GEO.pine1.translate(0, 5.4, 0);
 GEO.pine2.translate(0, 7.2, 0);
 GEO.pine3.translate(0, 8.7, 0);
 
+/* wind: shared uniforms + a vertex-sway shader hook (grass strong, foliage subtle) */
+const timeUniform = { value: 0 };
+const windUniform = { value: new THREE.Vector2(0.3, 0.0) }; // world-space wind vector
+function applyWind(mat, amount) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = timeUniform;
+    sh.uniforms.uWind = windUniform;
+    sh.vertexShader = 'uniform float uTime;\nuniform vec2 uWind;\n' + sh.vertexShader;
+    sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        vec3 iw = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+      #else
+        vec3 iw = vec3(0.0);
+      #endif
+      float ph = iw.x * 0.25 + iw.z * 0.25;
+      float bend = max(position.y, 0.0) * ${amount.toFixed(3)};
+      transformed.x += sin(uTime * 1.7 + ph) * uWind.x * bend;
+      transformed.z += cos(uTime * 1.4 + ph) * uWind.y * bend;
+    `);
+  };
+  mat.needsUpdate = true;
+}
+applyWind(MAT.grass, 0.55);
+applyWind(MAT.pine, 0.012);
+applyWind(MAT.pineHi, 0.012);
+
 /* ----------------------------------------------------------------------------
  * 4. Chunk manager — terrain + scatter
  * -------------------------------------------------------------------------- */
@@ -305,21 +332,32 @@ const _q = new THREE.Quaternion();
 const _v = new THREE.Vector3();
 const _s = new THREE.Vector3();
 
+// forest density type from a low-frequency map: 0 = dense, 1 = medium, 2 = sparse
+function forestType(cx, cz) {
+  const n = fbm(cx * 0.16 + 500, cz * 0.16 - 500, 2);
+  return n < 0.42 ? 0 : n < 0.68 ? 1 : 2;
+}
+
 function buildScatter(cx, cz, group) {
   const r = rng((cx * 73856093) ^ (cz * 19349663) ^ 0x9e37);
   const ox = cx * CHUNK, oz = cz * CHUNK;
+  const colliders = group.userData.colliders = [];   // {x,z,r} for physics
 
-  // decide biome density from average height
+  // decide biome density from average height + forest type
   const midH = terrainHeight(ox + CHUNK/2, oz + CHUNK/2);
+  const ft = forestType(cx, cz);
+  group.userData.forestType = ft;
 
   // ---- village? rare, on flattish low-mid land ----
   if (hash2(cx + 999, cz - 999) > 0.93 && midH > WATER + 3 && midH < 26) {
-    buildVillage(ox + CHUNK/2, oz + CHUNK/2, group);
+    buildVillage(ox + CHUNK/2, oz + CHUNK/2, group, colliders);
     villages.push({ x: ox + CHUNK/2, z: oz + CHUNK/2 });
   }
 
-  // ---- trees ----
-  const treeN = midH > 40 ? 4 : midH < WATER + 1 ? 0 : 26;
+  // ---- trees (density by forest type) ----
+  //   0 dense ≈ 46, 1 medium ≈ 20, 2 sparse ≈ 2 (≈4 trees / 100m×100m)
+  let treeN = ft === 0 ? 46 : ft === 1 ? 20 : 2;
+  if (midH > 40) treeN = Math.min(treeN, 4); else if (midH < WATER + 1) treeN = 0;
   const trunkM = new THREE.InstancedMesh(GEO.trunk, MAT.trunk, treeN);
   const p1 = new THREE.InstancedMesh(GEO.pine1, MAT.pine, treeN);
   const p2 = new THREE.InstancedMesh(GEO.pine2, MAT.pineHi, treeN);
@@ -336,6 +374,7 @@ function buildScatter(cx, cz, group) {
     _s.set(sc, sc * (0.9 + r()*0.3), sc);
     _m.compose(_v.set(wx, h, wz), _q, _s);
     trunkM.setMatrixAt(tc, _m); p1.setMatrixAt(tc, _m); p2.setMatrixAt(tc, _m); p3.setMatrixAt(tc, _m);
+    colliders.push({ x: wx, z: wz, r: 0.45 * sc });   // trunk collision
     tc++;
   }
   [trunkM,p1,p2,p3].forEach(m => { m.count = tc; m.instanceMatrix.needsUpdate = true; if (tc) group.add(m); });
@@ -353,14 +392,15 @@ function buildScatter(cx, cz, group) {
     _q.setFromEuler(new THREE.Euler(r()*TAU, r()*TAU, r()*TAU));
     _m.compose(_v.set(wx, h + sc*0.3, wz), _q, _s.set(sc, sc*0.8, sc));
     rockM.setMatrixAt(rc++, _m);
+    if (sc > 0.8) colliders.push({ x: wx, z: wz, r: sc * 0.7 });   // big rocks block
   }
   rockM.count = rc; rockM.instanceMatrix.needsUpdate = true; if (rc) group.add(rockM);
 
-  // ---- grass + flowers (near-ish, skip high/steep) ----
+  // ---- grass + flowers (thick in all forest types; sparse forest = thickest grass) ----
   if (midH > WATER + 0.5 && midH < 36) {
-    const grN = 220;
+    const grN = ft === 2 ? 340 : ft === 1 ? 300 : 240;
     const grassM = new THREE.InstancedMesh(GEO.grass, MAT.grass, grN);
-    const flN = 40;
+    const flN = ft === 0 ? 30 : 55;
     const flM = new THREE.InstancedMesh(GEO.flower, MAT.petal, flN);
     let gc = 0, fc = 0;
     for (let i = 0; i < grN; i++) {
@@ -405,8 +445,8 @@ function buildScatter(cx, cz, group) {
   }
 }
 
-// simple village = cluster of houses
-function buildVillage(cx, cz, group) {
+// simple village = cluster of houses (+ a merchant marker post)
+function buildVillage(cx, cz, group, colliders) {
   const r = rng((cx | 0) * 40503 ^ (cz | 0) * 1299721);
   const n = 3 + Math.floor(r() * 4);
   for (let i = 0; i < n; i++) {
@@ -424,7 +464,17 @@ function buildVillage(cx, cz, group) {
     house.position.set(x, h, z);
     house.rotation.y = r() * TAU;
     group.add(house);
+    if (colliders) colliders.push({ x, z, r: Math.max(w, d) * 0.55 });   // houses are solid
   }
+  // a golden market stall at the village centre (visual merchant spot)
+  const hc = terrainHeight(cx, cz);
+  const stall = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.2, 2.4),
+    new THREE.MeshLambertMaterial({ color: 0xb5892f }));
+  stall.position.set(cx, hc + 0.6, cz); stall.castShadow = true;
+  const flag = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.2, 4),
+    new THREE.MeshLambertMaterial({ color: 0xe6c15a }));
+  flag.position.set(cx, hc + 2.2, cz);
+  group.add(stall, flag);
 }
 
 function ensureChunk(cx, cz) {
@@ -472,7 +522,8 @@ const player = {
   hp: 100, hpMax: 100,
   stamina: 100, staMax: 100,
   gold: 0, kills: 0, xp: 0, level: 1, xpNext: 100,
-  weapon: 1,
+  weapon: 0,
+  owned: [true, false, false, false],   // fists owned; find/buy the rest
   alive: true,
 };
 // start at a decent grass spot
@@ -484,11 +535,20 @@ let locked = false;
 
 addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (e.code === 'Digit1') selectWeapon(0);
-  if (e.code === 'Digit2') selectWeapon(1);
-  if (e.code === 'Digit3') selectWeapon(2);
-  if (e.code === 'KeyF') tryInteract();
-  if (e.code === 'Escape' && state === 'play') pauseGame();
+  if (state === 'play') {
+    if (e.code === 'Digit1') selectWeapon(0);
+    if (e.code === 'Digit2') selectWeapon(1);
+    if (e.code === 'Digit3') selectWeapon(2);
+    if (e.code === 'Digit4') selectWeapon(3);
+    if (e.code === 'KeyF') tryInteract();
+    if (e.code === 'KeyE') tryShop();
+    if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); openInventory(); }
+    if (e.code === 'Escape') pauseGame();
+  } else if (state === 'inv' && (e.code === 'KeyI' || e.code === 'Tab' || e.code === 'Escape')) {
+    e.preventDefault(); closeInventory();
+  } else if (state === 'shop' && e.code === 'Escape') {
+    closeShop();
+  }
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -537,6 +597,9 @@ function updatePlayer(dt) {
 
   player.pos.addScaledVector(player.vel, dt);
 
+  // obstacle physics — push out of trees, rocks, houses (circle collision in XZ)
+  resolveObstacles();
+
   // terrain collision
   const ground = terrainHeight(player.pos.x, player.pos.z) + player.height;
   if (player.pos.y <= ground) {
@@ -557,15 +620,40 @@ function updatePlayer(dt) {
   sun.target.position.set(player.pos.x, 0, player.pos.z);
 }
 
+// resolve player vs obstacle colliders from the current + neighbouring chunks
+const PLAYER_R = 0.5;
+function resolveObstacles() {
+  const ccx = Math.floor(player.pos.x / CHUNK), ccz = Math.floor(player.pos.z / CHUNK);
+  for (let dz = -1; dz <= 1; dz++)
+    for (let dx = -1; dx <= 1; dx++) {
+      const c = chunks.get(chunkKey(ccx + dx, ccz + dz));
+      const cols = c && c.userData.colliders;
+      if (!cols) continue;
+      for (let i = 0; i < cols.length; i++) {
+        const o = cols[i];
+        let px = player.pos.x - o.x, pz = player.pos.z - o.z;
+        const min = o.r + PLAYER_R;
+        const d2 = px * px + pz * pz;
+        if (d2 < min * min && d2 > 1e-6) {
+          const d = Math.sqrt(d2);
+          const push = (min - d) / d;
+          player.pos.x += px * push;
+          player.pos.z += pz * push;
+        }
+      }
+    }
+}
+
 /* ----------------------------------------------------------------------------
  * 6. Weapons + viewmodel + combat
  * -------------------------------------------------------------------------- */
 const WEAPONS = [
-  { name: 'خنجر', dmg: 16, range: 3.2, arc: 0.55, cd: 0.28, knock: 3 },
-  { name: 'سيف',  dmg: 34, range: 4.2, arc: 0.62, cd: 0.5,  knock: 6 },
-  { name: 'رمح',  dmg: 46, range: 6.4, arc: 0.42, cd: 0.72, knock: 9 },
+  { id:'fists',  name: 'قبضة', icon:'👊', dmg: 8,  range: 2.4, arc: 0.5,  cd: 0.4,  knock: 1, canFish:false, price: 0 },
+  { id:'dagger', name: 'خنجر', icon:'🗡️', dmg: 16, range: 3.2, arc: 0.55, cd: 0.28, knock: 3, canFish:false, price: 60 },
+  { id:'sword',  name: 'سيف', icon:'⚔️', dmg: 34, range: 4.2, arc: 0.62, cd: 0.5,  knock: 6, canFish:false, price: 150 },
+  { id:'spear',  name: 'رمح', icon:'🔱', dmg: 46, range: 6.4, arc: 0.42, cd: 0.72, knock: 9, canFish:true,  price: 110 },
 ];
-let attackTimer = 0, swing = 0;
+let attackTimer = 0, swing = 0, fishing = 0;
 
 // viewmodel — a weapon rig attached to the camera
 const viewRig = new THREE.Group();
@@ -579,12 +667,17 @@ function buildWeaponModel(idx) {
   const steel = new THREE.MeshStandardMaterial({ color: 0xcfd6dd, metalness: 0.9, roughness: 0.25 });
   const grip  = new THREE.MeshStandardMaterial({ color: 0x3a2a1c, roughness: 0.8 });
   const gold  = new THREE.MeshStandardMaterial({ color: 0xe6c15a, metalness: 0.8, roughness: 0.3 });
-  if (idx === 0) { // dagger
+  if (idx === 0) { // fists — a simple gloved hand
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8),
+      new THREE.MeshStandardMaterial({ color: 0x9c6b43, roughness: 0.9 }));
+    hand.scale.set(1, 0.8, 1.2); hand.position.y = 0.1;
+    weaponMesh.add(hand);
+  } else if (idx === 1) { // dagger
     const blade = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.5, 4), steel); blade.position.y = 0.45;
     const h = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.2, 8), grip);
     const g = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.03, 0.04), gold); g.position.y = 0.12;
     weaponMesh.add(blade, h, g);
-  } else if (idx === 1) { // sword
+  } else if (idx === 2) { // sword
     const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.02), steel); blade.position.y = 0.75;
     const tip = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.18, 4), steel); tip.position.y = 1.28;
     const h = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.26, 8), grip);
@@ -603,15 +696,32 @@ function buildWeaponModel(idx) {
 }
 
 function selectWeapon(i) {
+  if (!player.owned[i]) { toast('🔒 لا تملك هذا السلاح — ابحث عنه أو اشترِه', ''); return; }
   player.weapon = i;
   buildWeaponModel(i);
   document.querySelectorAll('.wslot').forEach(el =>
     el.classList.toggle('active', +el.dataset.slot === i));
 }
+// keep the weapon wheel's lock state in sync with ownership
+function refreshWeaponWheel() {
+  document.querySelectorAll('.wslot').forEach(el => {
+    const s = +el.dataset.slot;
+    el.classList.toggle('locked', !player.owned[s]);
+    el.classList.toggle('active', s === player.weapon);
+  });
+}
+function unlockWeapon(i) {
+  if (player.owned[i]) return false;
+  player.owned[i] = true;
+  refreshWeaponWheel();
+  return true;
+}
 
 function attack() {
-  if (attackTimer > 0 || !player.alive) return;
+  if (attackTimer > 0 || !player.alive || fishing > 0) return;
   const w = WEAPONS[player.weapon];
+  // fishing: spear (or any canFish tool) aimed near water
+  if (w.canFish && isNearWater()) { startFishing(); return; }
   attackTimer = w.cd; swing = 1;
   // hit detection: forward arc
   const fwd = _v.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw)).normalize();
@@ -632,10 +742,17 @@ function attack() {
 function updateWeaponAnim(dt) {
   attackTimer = Math.max(0, attackTimer - dt);
   swing = Math.max(0, swing - dt * 6);
-  // swing arc + idle bob
-  const t = 1 - swing;
-  const swingRot = Math.sin(swing * Math.PI);
   const bob = Math.sin(walkPhase) * 0.02;
+  if (fishing > 0) {
+    // spear thrust downward-forward while fishing
+    const f = Math.sin((1 - fishing) * Math.PI);
+    weaponMesh.rotation.x = 1.4 + f * 0.5;
+    weaponMesh.rotation.z = 0.05;
+    weaponMesh.position.set(0.28, -0.55 - f * 0.25, -0.7 - f * 0.35);
+    return;
+  }
+  // swing arc + idle bob
+  const swingRot = Math.sin(swing * Math.PI);
   weaponMesh.rotation.x = 0.9 - swingRot * 1.7;
   weaponMesh.rotation.z = 0.15 + swingRot * 0.4;
   weaponMesh.position.y = -0.62 + bob - swingRot * 0.12;
@@ -876,8 +993,43 @@ const RARITY = {
   epic:      { c: 0xb06bff, label: 'ملحمي', mul: 3.6, cls: 'epic' },
   legendary: { c: 0xe6c15a, label: 'أسطوري', mul: 6, cls: 'legendary' },
 };
-const LOOT_NAMES = ['خنجر فولاذي','سيف قديم','رأس رمح','درع جلدي','عملات ذهبية','عشبة شفاء','جوهرة الغابة','تعويذة الدب'];
+// item registry — everything the player can collect / keep in the bag
+const ITEMS = {
+  coin:   { id:'coin',   name:'عملات ذهبية', icon:'🪙', type:'currency' },
+  herb:   { id:'herb',   name:'عشبة شفاء',   icon:'🌿', type:'food', heal:35 },
+  meat:   { id:'meat',   name:'لحم بري',     icon:'🍖', type:'food', heal:22 },
+  fishI:  { id:'fishI',  name:'سمكة',        icon:'🐟', type:'food', heal:26 },
+  pelt:   { id:'pelt',   name:'فرو',         icon:'🟫', type:'material' },
+  gem:    { id:'gem',    name:'جوهرة الغابة',icon:'💎', type:'material' },
+  amulet: { id:'amulet', name:'تعويذة الدب', icon:'🧿', type:'material' },
+  dagger: { id:'dagger', name:'خنجر فولاذي', icon:'🗡️', type:'weapon', weaponIdx:1 },
+  sword:  { id:'sword',  name:'سيف قديم',    icon:'⚔️', type:'weapon', weaponIdx:2 },
+  spear:  { id:'spear',  name:'رمح صيد',     icon:'🔱', type:'weapon', weaponIdx:3 },
+};
+// loot tables per source (id → weight)
+const LOOT_TABLES = {
+  basic: [['meat',5],['pelt',3],['herb',2],['coin',4],['dagger',1]],
+  good:  [['pelt',4],['meat',3],['coin',5],['herb',2],['dagger',3],['spear',2],['sword',1],['gem',1]],
+  boss:  [['gem',4],['amulet',3],['coin',6],['sword',3],['spear',3],['dagger',2]],
+};
+function pickFromTable(kind) {
+  const table = LOOT_TABLES[kind] || LOOT_TABLES.basic;
+  let total = 0; for (const [, w] of table) total += w;
+  let r = Math.random() * total;
+  for (const [id, w] of table) { r -= w; if (r <= 0) return id; }
+  return table[0][0];
+}
+
 const loot = [];
+const inventory = [];   // the bag: [{ id,name,icon,type,rarity,qty,... }]
+
+function addItem(itemId, qty = 1, rarity = 'common') {
+  const def = ITEMS[itemId]; if (!def) return;
+  if (def.type === 'currency') { player.gold += qty; updateHUD(); return; }
+  let stack = inventory.find(s => s.id === itemId);
+  if (stack) stack.qty += qty;
+  else inventory.push({ ...def, rarity, qty });
+}
 
 function rollRarity(kind) {
   const r = Math.random();
@@ -887,10 +1039,12 @@ function rollRarity(kind) {
 }
 
 function dropLoot(pos, kind) {
-  const count = kind === 'boss' ? 5 : 1;
+  const count = kind === 'boss' ? 5 : 1 + (Math.random() < 0.4 ? 1 : 0);
   for (let i = 0; i < count; i++) {
     const rarity = rollRarity(kind);
     const meta = RARITY[rarity];
+    const itemId = pickFromTable(kind);
+    const def = ITEMS[itemId];
     const geo = new THREE.OctahedronGeometry(0.35, 0);
     const mat = new THREE.MeshStandardMaterial({ color: meta.c, emissive: meta.c, emissiveIntensity: 0.5, metalness: 0.6, roughness: 0.3 });
     const m = new THREE.Mesh(geo, mat);
@@ -898,14 +1052,14 @@ function dropLoot(pos, kind) {
     const x = pos.x + Math.cos(a)*d, z = pos.z + Math.sin(a)*d;
     m.position.set(x, terrainHeight(x,z) + 0.7, z);
     m.castShadow = true;
-    // glow beam
     const beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.05, 0.4, 3, 6, 1, true),
-      new THREE.MeshBasicMaterial({ color: meta.c, transparent: true, opacity: 0.18, side: THREE.DoubleSide })
+      new THREE.CylinderGeometry(0.04, 0.28, 2.2, 6, 1, true),
+      new THREE.MeshBasicMaterial({ color: meta.c, transparent: true, opacity: 0.13, side: THREE.DoubleSide, depthWrite: false })
     );
-    beam.position.y = 1.4; m.add(beam);
+    beam.position.y = 1.1; m.add(beam);
     scene.add(m);
-    loot.push({ mesh: m, rarity, name: LOOT_NAMES[randi(0, LOOT_NAMES.length-1)], value: Math.round(rand(50,10)*meta.mul), spin: 0 });
+    const qty = def.type === 'currency' ? Math.round(rand(60, 15) * meta.mul) : 1;
+    loot.push({ mesh: m, rarity, itemId, name: def.name, icon: def.icon, qty, spin: 0 });
   }
 }
 
@@ -931,15 +1085,215 @@ function pickup(l) {
   const idx = loot.indexOf(l);
   if (idx >= 0) loot.splice(idx, 1);
   scene.remove(l.mesh);
-  player.gold += l.value;
-  // healing herb heals
-  if (l.name.includes('شفاء') || l.name.includes('تعويذة')) {
-    player.hp = clamp(player.hp + 35, 0, player.hpMax);
-  }
+  const def = ITEMS[l.itemId];
   const meta = RARITY[l.rarity];
-  toast(`+ ${l.name} <span class="r">(${meta.label} · ${l.value}💰)</span>`, meta.cls || '');
+  if (def.type === 'weapon') {
+    const newly = unlockWeapon(def.weaponIdx);
+    addItem(l.itemId, 1, l.rarity);
+    toast(`${l.icon} ${l.name} <span class="r">(${newly ? 'سلاح جديد!' : meta.label})</span>`, newly ? 'legendary' : (meta.cls||''));
+  } else if (def.type === 'currency') {
+    player.gold += l.qty;
+    toast(`🪙 +${l.qty} ذهب`, meta.cls || '');
+  } else {
+    addItem(l.itemId, l.qty, l.rarity);
+    toast(`${l.icon} + ${l.name} <span class="r">(${meta.label})</span>`, meta.cls || '');
+  }
   sfx('loot');
   updateHUD();
+  if (state === 'inv') renderInventory();
+}
+
+/* ----------------------------------------------------------------------------
+ * 9b. Fishing (spear near water)
+ * -------------------------------------------------------------------------- */
+const FISH_DUR = 1.2;
+let fishCatchPending = false;
+function isNearWater() {
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  for (const dd of [1.5, 3, 5, 7])
+    if (terrainHeight(player.pos.x + fx*dd, player.pos.z + fz*dd) < WATER + 0.3) return true;
+  return terrainHeight(player.pos.x, player.pos.z) < WATER + 0.9;
+}
+function startFishing() { fishing = 1; fishCatchPending = true; sfx('swing'); }
+function updateFishing(dt) {
+  if (fishing > 0) {
+    fishing = Math.max(0, fishing - dt / FISH_DUR);
+    if (fishing <= 0 && fishCatchPending) { fishCatchPending = false; resolveFishing(); }
+  }
+}
+function resolveFishing() {
+  let caught = Math.random() < 0.7;
+  for (let i = fish.length - 1; i >= 0; i--) {
+    const f = fish[i];
+    if (Math.hypot(f.mesh.position.x - player.pos.x, f.mesh.position.z - player.pos.z) < 28) {
+      scene.remove(f.mesh); fish.splice(i, 1); caught = true; break;
+    }
+  }
+  if (caught) { addItem('fishI', 1, 'common'); toast('🎣 اصطدت سمكة!', ''); sfx('loot'); if (state === 'inv') renderInventory(); }
+  else toast('🎣 لم تصطد شيئاً…', '');
+}
+
+/* ----------------------------------------------------------------------------
+ * 9c. Inventory (المحفظة)
+ * -------------------------------------------------------------------------- */
+function openInventory() {
+  if (state !== 'play') return;
+  state = 'inv'; document.exitPointerLock?.(); renderInventory(); show('inventory');
+}
+function closeInventory() {
+  if (state !== 'inv') return;
+  hide('inventory'); state = 'play'; canvas.requestPointerLock();
+}
+function renderInventory() {
+  $('inv-gold').textContent = player.gold;
+  const grid = $('inv-grid'); grid.innerHTML = '';
+  const SLOTS = 32;
+  for (let i = 0; i < Math.max(SLOTS, inventory.length); i++) {
+    const it = inventory[i];
+    const cell = document.createElement('div');
+    if (!it) { cell.className = 'inv-slot empty'; grid.appendChild(cell); continue; }
+    cell.className = 'inv-slot r-' + it.rarity;
+    cell.innerHTML = `<span>${it.icon}</span>${it.qty > 1 ? `<span class="qty">${it.qty}</span>` : ''}`;
+    cell.onclick = () => useItem(it);
+    cell.onmouseenter = () => showItemDetail(it);
+    grid.appendChild(cell);
+  }
+}
+function showItemDetail(it) {
+  let hint = '';
+  if (it.type === 'food') hint = `<span class="hint">انقر للأكل (+${it.heal} صحة)</span>`;
+  else if (it.type === 'weapon') hint = `<span class="hint">انقر للتجهيز</span>`;
+  else hint = `<span class="hint">مادة — للبيع أو الاستخدام لاحقاً</span>`;
+  $('inv-detail').innerHTML = `<b>${it.icon} ${it.name}</b> · ${RARITY[it.rarity].label} · ×${it.qty} — ${hint}`;
+}
+function useItem(it) {
+  if (it.type === 'food') {
+    player.hp = clamp(player.hp + it.heal, 0, player.hpMax);
+    it.qty--; if (it.qty <= 0) inventory.splice(inventory.indexOf(it), 1);
+    toast(`${it.icon} +${it.heal} صحة`, ''); sfx('loot'); updateHUD(); renderInventory();
+  } else if (it.type === 'weapon') {
+    selectWeapon(it.weaponIdx); toast(`جهّزت ${it.name}`, ''); renderInventory();
+  } else showItemDetail(it);
+}
+
+/* ----------------------------------------------------------------------------
+ * 9d. Village shop (buy weapons / potions)
+ * -------------------------------------------------------------------------- */
+function nearestVillage() {
+  let best = null, bd = 14;
+  for (const v of villages) {
+    const d = Math.hypot(v.x - player.pos.x, v.z - player.pos.z);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best;
+}
+function tryShop() { if (state === 'play' && nearestVillage()) openShop(); }
+function openShop() { state = 'shop'; document.exitPointerLock?.(); renderShop(); show('shop'); }
+function closeShop() { if (state !== 'shop') return; hide('shop'); state = 'play'; canvas.requestPointerLock(); }
+function renderShop() {
+  $('shop-gold').textContent = player.gold;
+  const list = $('shop-list'); list.innerHTML = '';
+  [1, 2, 3].forEach(idx => {
+    const w = WEAPONS[idx], owned = player.owned[idx];
+    const row = document.createElement('div');
+    row.className = 'shop-item' + (owned ? ' owned' : '');
+    row.innerHTML = `<span class="si-ico">${w.icon}</span><div class="si-info"><div class="si-name">${w.name}</div><div class="si-desc">ضرر ${w.dmg} · مدى ${w.range}${w.canFish ? ' · صيد سمك' : ''}</div></div>`;
+    const b = document.createElement('button'); b.className = 'si-buy';
+    if (owned) { b.textContent = 'مملوك'; b.disabled = true; }
+    else { b.textContent = `🪙 ${w.price}`; b.disabled = player.gold < w.price; b.onclick = () => buyWeapon(idx); }
+    row.appendChild(b); list.appendChild(row);
+  });
+  const row = document.createElement('div'); row.className = 'shop-item';
+  row.innerHTML = `<span class="si-ico">🧪</span><div class="si-info"><div class="si-name">جرعة شفاء</div><div class="si-desc">+50 صحة فوراً</div></div>`;
+  const b = document.createElement('button'); b.className = 'si-buy'; b.textContent = '🪙 40';
+  b.disabled = player.gold < 40; b.onclick = () => buyPotion();
+  row.appendChild(b); list.appendChild(row);
+}
+function buyWeapon(idx) {
+  const w = WEAPONS[idx];
+  if (player.gold < w.price || player.owned[idx]) return;
+  player.gold -= w.price; unlockWeapon(idx); addItem(w.id, 1, 'rare');
+  toast(`اشتريت ${w.name}!`, 'epic'); sfx('loot'); updateHUD(); renderShop();
+}
+function buyPotion() {
+  if (player.gold < 40) return;
+  player.gold -= 40; player.hp = clamp(player.hp + 50, 0, player.hpMax);
+  toast('🧪 +50 صحة', ''); sfx('loot'); updateHUD(); renderShop();
+}
+$('inv-close') && ($('inv-close').onclick = closeInventory);
+$('shop-close') && ($('shop-close').onclick = closeShop);
+
+// contextual on-screen prompt (shop near village / fishing near water)
+function updatePrompt() {
+  const p = $('prompt');
+  if (nearestVillage()) {
+    $('prompt-key').textContent = 'E'; $('prompt-text').textContent = 'فتح المتجر';
+    p.classList.remove('hidden');
+  } else if (WEAPONS[player.weapon].canFish && isNearWater()) {
+    $('prompt-key').textContent = 'زر أيسر'; $('prompt-text').textContent = 'صيد السمك بالرمح';
+    p.classList.remove('hidden');
+  } else p.classList.add('hidden');
+}
+
+/* ----------------------------------------------------------------------------
+ * 9e. Weather — morning fog, wind/storm, occasional snow
+ * -------------------------------------------------------------------------- */
+const weather = { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, mode:'صباح ضبابي', timer:18 };
+function resetWeather() {
+  Object.assign(weather, { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, mode:'صباح ضبابي', timer:18 });
+}
+function pickWeather() {
+  const r = Math.random();
+  if      (r < 0.30) Object.assign(weather, { mode:'صحو',        windTarget:rand(0.35,0.15), fogTarget:0.05, snowTarget:0,   timer:rand(45,25) });
+  else if (r < 0.50) Object.assign(weather, { mode:'رياح عادية', windTarget:rand(0.55,0.4),  fogTarget:0.05, snowTarget:0,   timer:rand(35,20) });
+  else if (r < 0.66) Object.assign(weather, { mode:'رياح قوية',  windTarget:rand(0.95,0.75), fogTarget:0.10, snowTarget:0,   timer:rand(30,18) });
+  else if (r < 0.78) Object.assign(weather, { mode:'عاصفة',      windTarget:rand(1.3,1.0),   fogTarget:0.32, snowTarget:0.5, timer:rand(26,16) });
+  else if (r < 0.90) Object.assign(weather, { mode:'ثلج خفيف',   windTarget:rand(0.4,0.2),   fogTarget:0.15, snowTarget:0.4, timer:rand(34,22) });
+  else               Object.assign(weather, { mode:'صباح ضبابي', windTarget:0.2,             fogTarget:0.9,  snowTarget:0,   timer:rand(30,20) });
+  weather.windDir += rand(1.2, -1.2);
+}
+function updateWeather(dt) {
+  weather.timer -= dt;
+  if (weather.timer <= 0) pickWeather();
+  weather.wind = lerp(weather.wind, weather.windTarget, dt * 0.4);
+  weather.fog  = lerp(weather.fog,  weather.fogTarget,  dt * 0.15);
+  weather.snow = lerp(weather.snow, weather.snowTarget, dt * 0.3);
+  windUniform.value.set(Math.cos(weather.windDir) * weather.wind, Math.sin(weather.windDir) * weather.wind);
+  scene.fog.near = lerp(CHUNK * 2.2, 6, weather.fog);
+  scene.fog.far  = lerp(CHUNK * (VIEW + 0.6), CHUNK * 1.5, weather.fog);
+  const dark = weather.mode === 'عاصفة' ? 0.55 : 1;
+  sun.intensity = lerp(sun.intensity, 2.1 * dark, dt * 2);
+  if (ambientNode) ambientNode.gain.value = 0.03 + weather.wind * 0.06;
+  updateSnow(dt);
+  $('w-mode').textContent = weather.mode;
+  $('w-windv').textContent = weather.wind < 0.35 ? 'هادئ' : weather.wind < 0.6 ? 'نسيم' : weather.wind < 0.95 ? 'قوي' : 'عاصف';
+}
+
+// snow particle field around the player
+const SNOW_N = 1400;
+let snowPoints = null, snowPos = null;
+function initSnow() {
+  snowPos = new Float32Array(SNOW_N * 3);
+  for (let i = 0; i < SNOW_N; i++) { snowPos[i*3] = rand(80,-80); snowPos[i*3+1] = rand(60,0); snowPos[i*3+2] = rand(80,-80); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+  const m = new THREE.PointsMaterial({ color: 0xffffff, size: 0.45, transparent: true, opacity: 0, depthWrite: false });
+  snowPoints = new THREE.Points(g, m); snowPoints.frustumCulled = false; scene.add(snowPoints);
+}
+function updateSnow(dt) {
+  if (!snowPoints) return;
+  snowPoints.material.opacity = weather.snow * 0.9;
+  snowPoints.visible = weather.snow > 0.02;
+  if (!snowPoints.visible) return;
+  const wx = windUniform.value.x, wz = windUniform.value.y;
+  for (let i = 0; i < SNOW_N; i++) {
+    snowPos[i*3]   += wx * 6 * dt + Math.sin((elapsed + i) * 2) * 0.2 * dt;
+    snowPos[i*3+1] -= (2.2 + weather.wind) * dt;
+    snowPos[i*3+2] += wz * 6 * dt;
+    if (snowPos[i*3+1] < -6) { snowPos[i*3+1] = 55; snowPos[i*3] = rand(80,-80); snowPos[i*3+2] = rand(80,-80); }
+  }
+  snowPoints.geometry.attributes.position.needsUpdate = true;
+  snowPoints.position.set(player.pos.x, player.pos.y, player.pos.z);
 }
 
 /* ----------------------------------------------------------------------------
@@ -1058,7 +1412,6 @@ function drawMinimap() {
 /* ----------------------------------------------------------------------------
  * 13. HUD helpers
  * -------------------------------------------------------------------------- */
-const $ = id => document.getElementById(id);
 function updateHUD() {
   $('hp-fill').style.width = (player.hp / player.hpMax * 100) + '%';
   $('hp-num').textContent = Math.ceil(player.hp);
@@ -1209,20 +1562,25 @@ function startGame(){
   };
   // reset player
   Object.assign(player, { hp:100, hpMax:100, stamina:100, gold:0, kills:0, xp:0, level:1, xpNext:100, alive:true });
+  player.owned = [true, false, false, false];
+  player.weapon = 0;
+  inventory.length = 0;
   player.pos.set(0, terrainHeight(0,0)+player.height+2, 0);
   player.vel.set(0,0,0); player.yaw=0; player.pitch=0;
   clearEntities();
-  selectWeapon(1);
+  resetWeather();
+  selectWeapon(0);
+  refreshWeaponWheel();
   updateHUD();
   warm();
 }
 function finishLoad(){
   hide('loading'); show('hud'); state='play';
-  objectiveText('استكشف الغابة اللانهائية… الدب الأسطوري ينتظر في مكان ما.');
+  objectiveText('لا تملك سلاحاً بعد — ابحث عن الأسلحة في اللوت أو اشترِها من القرى.');
   // seed some wildlife + schedule the bear
   for (let i=0;i<6;i++) manageSpawns(999);
   bearSpawned = false;
-  bearTimer = 8;
+  bearTimer = 150;   // the bear appears after you've explored / armed up
   // debug: #boss spawns the legendary bear right away
   if (location.hash.includes('boss')) { bearTimer = 0; maybeSpawnBear(0.01); }
   canvas.requestPointerLock();
@@ -1246,7 +1604,7 @@ let bearTimer = 8;
 function maybeSpawnBear(dt){
   if (bearSpawned) return;
   bearTimer -= dt;
-  if (bearTimer <= 0 || player.kills >= 6) {
+  if (bearTimer <= 0 || player.kills >= 8) {
     bearSpawned = true;
     const a = rand(TAU), d = 70;
     let x = player.pos.x + Math.cos(a)*d, z = player.pos.z + Math.sin(a)*d;
@@ -1262,7 +1620,8 @@ function maybeSpawnBear(dt){
 /* ----------------------------------------------------------------------------
  * 17. Main loop
  * -------------------------------------------------------------------------- */
-selectWeapon(1);
+buildWeaponModel(0);   // start empty-handed (fists)
+initSnow();
 const clock = new THREE.Clock();
 
 function animate(){
@@ -1278,11 +1637,14 @@ function animate(){
   }
   if (state === 'play'){
     elapsed += dt;
+    timeUniform.value = elapsed;
     updatePlayer(dt);
     // walk bob phase
     const moving = (keys['KeyW']||keys['KeyS']||keys['KeyA']||keys['KeyD']) && player.onGround;
     walkPhase += dt * (moving ? (keys['ShiftLeft']?16:10) : 0);
     updateWeaponAnim(dt);
+    updateFishing(dt);
+    updateWeather(dt);
     updateChunks(player.pos.x, player.pos.z);
     manageSpawns(dt);
     maybeSpawnBear(dt);
@@ -1292,6 +1654,8 @@ function animate(){
     updateParticles(dt);
     // vignette fade
     if (vigT > 0){ vigT -= dt; if (vigT <= 0) $('vignette').classList.remove('show'); }
+    // village shop prompt
+    updatePrompt();
     // stamina/hud tick
     $('sta-fill').style.width = (player.stamina/player.staMax*100)+'%';
     $('stat-time').textContent = fmtTime(elapsed);
@@ -1317,3 +1681,16 @@ addEventListener('resize', () => {
 
 // warm the very first chunks so menu bg has data & play start is instant-ish
 updateChunks(0, 0);
+
+// optional debug bridge (append #debug to the URL): quick testing helpers
+if (location.hash.includes('debug')) {
+  window.__DBG = {
+    player, inventory, WEAPONS, villages, weather,
+    gold: (n = 500) => { player.gold += n; updateHUD(); },
+    give: (id) => { const d = ITEMS[id]; if (d.type === 'weapon') unlockWeapon(d.weaponIdx); addItem(id, 1, 'rare'); },
+    drop: (kind = 'good') => dropLoot(player.pos, kind),
+    villageHere: () => villages.push({ x: player.pos.x + 3, z: player.pos.z }),
+    setWeather: (m) => { weather.timer = 999; Object.assign(weather, m); },
+    openShop, openInventory,
+  };
+}
