@@ -31,6 +31,24 @@ npx serve .
 
 ---
 
+## 🌐 لعب مباشر في المتصفح (رابط GitHub Pages)
+
+اللعبة جاهزة للنشر على **GitHub Pages** ليصبح لها رابط قابل للعب. يكفي تفعيل واحد
+لمرة واحدة (لأن GitHub لا يسمح للأتمتة بتفعيل Pages تلقائياً):
+
+1. افتح: **Settings → Pages** في المستودع
+   (`https://github.com/mouhirimad17-debug/imad/settings/pages`).
+2. في **Build and deployment → Source** اختر **«Deploy from a branch»**.
+3. اختر الفرع **`claude/3d-forest-combat-game-emy9nr`** والمجلّد **`/ (root)`** ثم **Save**.
+4. انتظر دقيقة، وسيصبح الرابط جاهزاً:
+
+   **▶️ https://mouhirimad17-debug.github.io/imad/**
+
+> ملف `.nojekyll` مضاف مسبقاً حتى يخدم Pages مجلدات `vendor/` و`assets/` كما هي.
+> ملاحظة: النماذج ~46MB فالتحميل الأول ياخذ لحظات (تظهر شاشة تحميل بالتقدّم).
+
+---
+
 ## 🎮 التحكم
 
 | المفتاح | الوظيفة |
