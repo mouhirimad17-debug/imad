@@ -309,6 +309,10 @@ const MAT = {
   skin:    new THREE.MeshLambertMaterial({ color: 0xc9a67e }),
   flame:   new THREE.MeshBasicMaterial({ color: 0xff8a2a, transparent: true, opacity: 0.9 }),
   ember:   new THREE.MeshLambertMaterial({ color: 0x3a2418 }),
+  crop:    new THREE.MeshLambertMaterial({ color: 0x3f7d3a, flatShading: true }),
+  fruit:   new THREE.MeshLambertMaterial({ color: 0xd23b2b, flatShading: true }),
+  fence:   new THREE.MeshLambertMaterial({ color: 0x6b4a2c }),
+  soil:    new THREE.MeshLambertMaterial({ color: 0x5a4028 }),
 };
 
 const GEO = {
@@ -325,6 +329,9 @@ const GEO = {
     return mergeGeos(a, b);
   })(),
   flower: new THREE.CircleGeometry(0.22, 5),
+  cropStem: (() => { const c = new THREE.ConeGeometry(0.32, 0.9, 5); c.translate(0, 0.45, 0); return c; })(),
+  cropFruit: new THREE.IcosahedronGeometry(0.16, 0),
+  fencePost: (() => { const b = new THREE.BoxGeometry(0.12, 1.0, 0.12); b.translate(0, 0.5, 0); return b; })(),
   cactus: (() => {
     // saguaro: a tall body + two arms, merged into one geometry
     const body = new THREE.CylinderGeometry(0.4, 0.5, 3.2, 7); body.translate(0, 1.6, 0);
@@ -432,6 +439,7 @@ scene.add(chunkGroup);
 const chunks = new Map();       // key "cx,cz" -> chunk object
 const villages = [];            // {x,z} town centers for minimap
 const shops = [];               // {x,z,type,name,key} shop stalls in towns
+const crops = [];               // {x,z,im,fim,idx,key,harvested,regrow} harvestable field crops
 
 function chunkKey(cx, cz) { return cx + ',' + cz; }
 
@@ -493,9 +501,15 @@ function buildScatter(cx, cz, group) {
     villages.push({ x: ox + CHUNK/2, z: oz + CHUNK/2 });
   }
 
-  // ---- trees (density by forest type; none in desert or town) ----
+  // ---- farm? on flat rural land near settlements ----
+  const isFarm = !isDesert && !isTown && hash2(cx + 555, cz - 555) > 0.9
+    && midH > WATER + 2 && midH < 22 && terrainSlope(ox + CHUNK/2, oz + CHUNK/2) < 0.26;
+  group.userData.isFarm = isFarm;
+  if (isFarm) buildFarm(ox + CHUNK/2, oz + CHUNK/2, group, colliders, group.userData.key);
+
+  // ---- trees (density by forest type; none in desert or town; sparse on farms) ----
   //   0 dense ≈ 46, 1 medium ≈ 20, 2 sparse ≈ 2 (≈4 trees / 100m×100m)
-  let treeN = (isDesert || isTown) ? 0 : (ft === 0 ? 46 : ft === 1 ? 20 : 2);
+  let treeN = (isDesert || isTown) ? 0 : isFarm ? 6 : (ft === 0 ? 46 : ft === 1 ? 20 : 2);
   if (midH > 40) treeN = Math.min(treeN, 4); else if (midH < WATER + 1) treeN = 0;
   const trunkM = new THREE.InstancedMesh(GEO.trunk, MAT.trunk, treeN);
   const p1 = new THREE.InstancedMesh(GEO.pine1, MAT.pine, treeN);
@@ -636,21 +650,29 @@ function buildScatter(cx, cz, group) {
 
 // simple village = cluster of houses (+ a merchant marker post)
 // a proper house: plastered walls, roof, door, windows, chimney
+// a flat-shaded low-poly house (stone base, walls, pyramid roof, framed windows)
 function makeHouse(rr, w, d, wallH, wallMat) {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(GEO.unitBox, wallMat);
-  body.scale.set(w, wallH, d); body.position.y = wallH / 2;
-  body.castShadow = body.receiveShadow = true;
-  const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.72, 1.7 + rr() * 0.8, 4), MAT.roof);
-  roof.position.y = wallH + (1.7) / 2 + 0.1; roof.rotation.y = Math.PI / 4; roof.castShadow = true;
+  const wm = wallMat.clone(); wm.flatShading = true;
+  const rm = MAT.roof.clone(); rm.flatShading = true; rm.color.setHSL(0.03 + rr()*0.04, 0.5, 0.32 + rr()*0.12);
+  const base = new THREE.Mesh(GEO.unitBox, MAT.rock);
+  base.scale.set(w * 1.06, 0.4, d * 1.06); base.position.y = 0.2; base.receiveShadow = true;
+  const body = new THREE.Mesh(GEO.unitBox, wm);
+  body.scale.set(w, wallH, d); body.position.y = wallH / 2 + 0.4; body.castShadow = body.receiveShadow = true;
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.8, 1.6 + rr() * 0.9, 4), rm);
+  roof.position.y = wallH + 0.4 + (1.6 + rr()*0.9)/2 + 0.02; roof.rotation.y = Math.PI / 4; roof.castShadow = true;
   const door = new THREE.Mesh(GEO.unitBox, MAT.door);
-  door.scale.set(0.9, 1.7, 0.12); door.position.set(0, 0.85, d / 2 + 0.02);
-  const w1 = new THREE.Mesh(GEO.unitBox, MAT.window);
-  w1.scale.set(0.8, 0.7, 0.1); w1.position.set(w * 0.28, wallH * 0.62, d / 2 + 0.02);
-  const w2 = w1.clone(); w2.position.x = -w * 0.28;
-  const chim = new THREE.Mesh(GEO.unitBox, MAT.roof);
-  chim.scale.set(0.4, 1.1, 0.4); chim.position.set(w * 0.28, wallH + 1, -d * 0.2); chim.castShadow = true;
-  g.add(body, roof, door, w1, w2, chim);
+  door.scale.set(0.9, 1.7, 0.14); door.position.set(0, 0.4 + 0.85, d / 2 + 0.02);
+  const parts = [base, body, roof, door];
+  for (const x of [w * 0.28, -w * 0.28]) {
+    const fr = new THREE.Mesh(GEO.unitBox, MAT.door); fr.scale.set(0.95, 0.85, 0.1); fr.position.set(x, 0.4 + wallH * 0.62, d / 2 + 0.02);
+    const gl = new THREE.Mesh(GEO.unitBox, MAT.window); gl.scale.set(0.72, 0.62, 0.14); gl.position.set(x, 0.4 + wallH * 0.62, d / 2 + 0.03);
+    parts.push(fr, gl);
+  }
+  const chim = new THREE.Mesh(GEO.unitBox, MAT.rock);
+  chim.scale.set(0.42, 1.2, 0.42); chim.position.set(w * 0.28, wallH + 0.9, -d * 0.2); chim.castShadow = true;
+  parts.push(chim);
+  g.add(...parts);
   return g;
 }
 // shop sign sprite (Arabic label on a wooden board)
@@ -698,8 +720,8 @@ function buildVillage(cx, cz, group, colliders) {
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
       const makeShop = shopBudget > 0 && edge && r() < 0.28;
       const w = 3.6 + r() * 1.6, d = 3.6 + r() * 1.6, wallH = 2.8 + r() * 1.2;
-      // prefer a GLB house model; fall back to the procedural box house
-      const glb = instModel(HOUSE_KEYS[Math.floor(r() * HOUSE_KEYS.length)]);
+      // mostly GLB house models; ~28% procedural low-poly houses for extra variety
+      const glb = r() < 0.72 ? instModel(HOUSE_KEYS[Math.floor(r() * HOUSE_KEYS.length)]) : null;
       const house = glb || makeHouse(r, w, d, wallH, wallMats[(ci + ri) & 1]);
       house.rotation.y = Math.atan2(cx - x, cz - z) + (r() < 0.5 ? 0 : Math.PI);
       house.position.set(x, h, z);
@@ -789,16 +811,79 @@ function buildOasis(cx, cz, group, colliders) {
   }
 }
 
+// a fenced farm: instanced crops (harvestable) + a couple of farm animals
+const _fm = new THREE.Matrix4(), _fq = new THREE.Quaternion(), _fv = new THREE.Vector3(), _fs = new THREE.Vector3(1,1,1);
+function buildFarm(cx, cz, group, colliders, key) {
+  const r = rng(((cx*2654435761) ^ (cz*40503)) >>> 0);
+  const W = 13, D = 10;
+  const hc = terrainHeight(cx, cz);
+  // tilled soil
+  const soil = new THREE.Mesh(new THREE.PlaneGeometry(W, D), MAT.soil);
+  soil.rotation.x = -Math.PI/2; soil.position.set(cx, hc + 0.03, cz); soil.receiveShadow = true;
+  group.add(soil);
+  // fence (InstancedMesh of posts around the perimeter)
+  const posts = [];
+  for (let x = -W/2; x <= W/2; x += 1.5) { posts.push([x, -D/2]); posts.push([x, D/2]); }
+  for (let z = -D/2; z <= D/2; z += 1.5) { posts.push([-W/2, z]); posts.push([W/2, z]); }
+  const fenceIM = new THREE.InstancedMesh(GEO.fencePost, MAT.fence, posts.length);
+  fenceIM.castShadow = true;
+  posts.forEach((p, k) => { _fm.compose(_fv.set(cx+p[0], terrainHeight(cx+p[0], cz+p[1]), cz+p[1]), _fq.identity(), _fs); fenceIM.setMatrixAt(k, _fm); });
+  fenceIM.instanceMatrix.needsUpdate = true; group.add(fenceIM);
+  colliders.push({ x: cx, z: cz, r: 0 });  // (fence is passable in gaps; no full block)
+  // crop rows — two instanced meshes (stem + fruit) sharing positions
+  const spots = [];
+  for (let gx = -W/2+1.5; gx <= W/2-1.5; gx += 1.4)
+    for (let gz = -D/2+1.5; gz <= D/2-1.5; gz += 1.4) spots.push([cx+gx, cz+gz]);
+  const stemIM = new THREE.InstancedMesh(GEO.cropStem, MAT.crop, spots.length);
+  const fruitIM = new THREE.InstancedMesh(GEO.cropFruit, MAT.fruit, spots.length);
+  stemIM.castShadow = true;
+  spots.forEach((p, k) => {
+    const h = terrainHeight(p[0], p[1]);
+    _fm.compose(_fv.set(p[0], h, p[1]), _fq.identity(), _fs);
+    stemIM.setMatrixAt(k, _fm);
+    _fm.compose(_fv.set(p[0], h + 0.75, p[1]), _fq.identity(), _fs);
+    fruitIM.setMatrixAt(k, _fm);
+    crops.push({ x: p[0], z: p[1], stemIM, fruitIM, idx: k, key, harvested: false, regrow: 0 });
+  });
+  stemIM.instanceMatrix.needsUpdate = true; fruitIM.instanceMatrix.needsUpdate = true;
+  group.add(stemIM, fruitIM);
+  // a scarecrow
+  const pole = new THREE.Mesh(GEO.fencePost, MAT.fence); pole.scale.y = 2.2; pole.position.set(cx, hc, cz);
+  const cross = new THREE.Mesh(GEO.unitBox, MAT.fence); cross.scale.set(1.4, 0.12, 0.12); cross.position.set(cx, hc + 1.7, cz);
+  const shead = new THREE.Mesh(new THREE.SphereGeometry(0.28, 6, 6), MAT.drock); shead.position.set(cx, hc + 2.3, cz);
+  group.add(pole, cross, shead);
+  // farm animals
+  spawnEnemy('cow', cx + rand(4,-4), cz + rand(3,-3));
+  spawnEnemy('chicken', cx + rand(4,-4), cz + rand(3,-3));
+  spawnEnemy('chicken', cx + rand(4,-4), cz + rand(3,-3));
+}
+
 function ensureChunk(cx, cz) {
   const key = chunkKey(cx, cz);
   if (chunks.has(key)) { chunks.get(key).keep = true; return; }
   const group = new THREE.Group();
   group.userData.key = key;
+  group.userData.cx = cx * CHUNK + CHUNK / 2;
+  group.userData.cz = cz * CHUNK + CHUNK / 2;
   group.add(buildTerrainMesh(cx, cz));
   buildScatter(cx, cz, group);
   group.keep = true;
   chunkGroup.add(group);
   chunks.set(key, group);
+}
+
+// per-chunk frustum culling: skip rendering chunks outside the camera view
+const _frustum = new THREE.Frustum();
+const _projScreen = new THREE.Matrix4();
+const _csphere = new THREE.Sphere(new THREE.Vector3(), CHUNK * 0.85 + 22);
+function cullChunks() {
+  camera.updateMatrixWorld();
+  _projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _frustum.setFromProjectionMatrix(_projScreen);
+  chunks.forEach(c => {
+    _csphere.center.set(c.userData.cx, 18, c.userData.cz);
+    c.visible = _frustum.intersectsSphere(_csphere);
+  });
 }
 
 function updateChunks(px, pz) {
@@ -1250,22 +1335,35 @@ const enemies = [];
 let bear = null;         // the boss reference
 let bearSpawned = false;
 
+// a low-poly quadruped in the style of the GLB models (flat-shaded, snout/ears/tail)
 function makeQuadruped(bodyMatShared, size) {
   const g = new THREE.Group();
-  const bodyMat = bodyMatShared.clone();   // per-animal material so hit-flash is isolated
+  const bodyMat = bodyMatShared.clone(); bodyMat.flatShading = true; bodyMat.needsUpdate = true;
   g.userData.mat = bodyMat;
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(size*0.5, size*1.2, 4, 8), bodyMat);
-  body.rotation.z = Math.PI/2; body.position.y = size*1.1;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(size*0.5, 8, 8), bodyMat);
-  head.position.set(size*1.2, size*1.4, 0);
-  const legGeo = new THREE.CylinderGeometry(size*0.14, size*0.12, size*1.1, 6);
+  // angular body (tapered box)
+  const body = new THREE.Mesh(new THREE.BoxGeometry(size*2.1, size*0.95, size*0.95), bodyMat);
+  body.position.y = size*1.1; body.rotation.z = 0.02;
+  // head group (so it can dip on attack)
+  const head = new THREE.Group(); head.position.set(size*1.1, size*1.35, 0);
+  const skull = new THREE.Mesh(new THREE.BoxGeometry(size*0.62, size*0.62, size*0.6), bodyMat);
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(size*0.5, size*0.34, size*0.4), bodyMat);
+  snout.position.set(size*0.5, -size*0.1, 0);
+  const earGeo = new THREE.ConeGeometry(size*0.16, size*0.34, 4);
+  const e1 = new THREE.Mesh(earGeo, bodyMat); e1.position.set(-size*0.1, size*0.4, size*0.22);
+  const e2 = new THREE.Mesh(earGeo, bodyMat); e2.position.set(-size*0.1, size*0.4, -size*0.22);
+  head.add(skull, snout, e1, e2);
+  // tail
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(size*0.16, size*0.9, 5), bodyMat);
+  tail.position.set(-size*1.15, size*1.25, 0); tail.rotation.z = 1.9;
+  // angular legs (boxes)
+  const legGeo = new THREE.BoxGeometry(size*0.26, size*1.1, size*0.26); legGeo.translate(0, -size*0.55, 0);
   const legs = [];
-  [[0.7,0.35],[0.7,-0.35],[-0.7,0.35],[-0.7,-0.35]].forEach(([lx,lz])=>{
+  [[0.72,0.32],[0.72,-0.32],[-0.72,0.32],[-0.72,-0.32]].forEach(([lx,lz])=>{
     const leg = new THREE.Mesh(legGeo, bodyMat);
-    leg.position.set(lx*size, size*0.55, lz*size);
+    leg.position.set(lx*size, size*1.05, lz*size);
     g.add(leg); legs.push(leg);
   });
-  g.add(body, head);
+  g.add(body, head, tail);
   g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   g.userData.legs = legs; g.userData.head = head;
   return g;
@@ -1468,7 +1566,8 @@ function updateEnemies(dt) {
           move.copy(dirToPlayer); e.speedCur = e.speed;
         } else {                              // attack
           e.speedCur = 0;
-          if (e.attackCd <= 0) { hurtPlayer(e.dmg); e.attackCd = e.type==='bear'?1.4:1.0; lungeEnemy(e, dirToPlayer); }
+          e.mesh.rotation.y = Math.atan2(dirToPlayer.x, dirToPlayer.z);   // face target
+          if (e.attackCd <= 0 && (e.atkT || 0) <= 0) { e.atkT = 0.4; e.atkHit = false; e.attackCd = e.type==='bear'?1.4:1.0; critterSound(e.type, 0.14); }
         }
       } else { // idle wander
         e.wanderT -= dt;
@@ -1493,6 +1592,19 @@ function updateEnemies(dt) {
 
     // leg animation
     walkAnim(e, e.speedCur, dt);
+
+    // attack lunge animation (a forward pounce + head dip; damage lands mid-swing)
+    if (e.atkT > 0) {
+      e.atkT -= dt;
+      const p = clamp(1 - e.atkT / 0.4, 0, 1);
+      const lunge = Math.sin(p * Math.PI);
+      e.mesh.position.x += dirToPlayer.x * lunge * 3.5 * dt;
+      e.mesh.position.z += dirToPlayer.z * lunge * 3.5 * dt;
+      const head = e.mesh.userData.head;
+      if (head) head.rotation.z = -lunge * 0.7;          // snap head/jaw forward
+      else e.mesh.rotation.x = lunge * 0.25;             // GLB: tip the whole body
+      if (p > 0.45 && !e.atkHit && dist < e.radius + 2.4) { hurtPlayer(e.dmg); e.atkHit = true; }
+    } else if (e.mesh.userData.head) { e.mesh.userData.head.rotation.z = 0; }
 
     // cull far dead-simple: despawn very far non-boss
     if (e.type !== 'bear' && dist > CHUNK * (VIEW + 2)) { scene.remove(e.mesh); enemies.splice(i,1); }
@@ -1694,7 +1806,32 @@ function tryInteract() {
     if (d < bd) { bd = d; best = l; }
   }
   if (best) { pickup(best); return; }
-  gatherSticks();   // otherwise try gathering sticks from a nearby tree
+  if (gatherCrop()) return;   // harvest a farm crop
+  gatherSticks();             // otherwise try gathering sticks from a nearby tree
+}
+function nearCrop() {
+  for (const c of crops) if (!c.harvested && Math.hypot(c.x - player.pos.x, c.z - player.pos.z) < 2.6) return c;
+  return null;
+}
+function gatherCrop() {
+  const c = nearCrop(); if (!c) return false;
+  c.harvested = true; c.regrow = 60;
+  const m = new THREE.Matrix4().compose(new THREE.Vector3(c.x, -1000, c.z), new THREE.Quaternion(), new THREE.Vector3(0.001, 0.001, 0.001));
+  c.fruitIM.setMatrixAt(c.idx, m); c.fruitIM.instanceMatrix.needsUpdate = true;
+  addItem('tomato', 1, 'common'); toast('🍅 حصدت طماطم', ''); sfx('loot');
+  if (state === 'inv') renderInventory();
+  return true;
+}
+function updateCrops(dt) {
+  for (const c of crops) {
+    if (!c.harvested) continue;
+    c.regrow -= dt;
+    if (c.regrow <= 0) {
+      c.harvested = false;
+      const m = new THREE.Matrix4().setPosition(c.x, terrainHeight(c.x, c.z) + 0.75, c.z);
+      c.fruitIM.setMatrixAt(c.idx, m); c.fruitIM.instanceMatrix.needsUpdate = true;
+    }
+  }
 }
 
 function pickup(l) {
@@ -1860,6 +1997,8 @@ Object.assign(ITEMS, {
   torch:  { id:'torch', name:'مشعل', icon:'🔦', type:'material' },
   rope:   { id:'rope',  name:'حبل', icon:'🪢', type:'material' },
   turban: { id:'turban',name:'عمامة', icon:'👳', type:'material' },
+  tomato: { id:'tomato',name:'طماطم', icon:'🍅', type:'food', heal:14 },
+  egg:    { id:'egg',   name:'بيض',   icon:'🥚', type:'food', heal:12 },
 });
 
 let currentShop = null;
@@ -1983,6 +2122,7 @@ const QUEST_DEFS = [
   { kind:'gather', item:'stick',  label:t=>`اجمع ${t} أعواد للقرية`, need:()=>5+randi(0,3), gold:70 },
   { kind:'gather', item:'pelt',   label:t=>`اجمع ${t} فراء`,         need:()=>4,            gold:100 },
   { kind:'gather', item:'meatC',  label:t=>`اطبخ وأحضر ${t} لحم مطبوخ`, need:()=>3,         gold:120 },
+  { kind:'gather', item:'tomato', label:t=>`احصد ${t} طماطم من المزرعة`, need:()=>6+randi(0,4), gold:90 },
 ];
 function countItem(id) { const s = inventory.find(x => x.id === id); return s ? s.qty : 0; }
 function questProgress() { if (!quest) return 0; return quest.kind === 'gather' ? Math.min(countItem(quest.item), quest.need) : quest.count; }
@@ -2029,6 +2169,7 @@ function updatePrompt() {
   else if (nearRideableHorse()) set('R', 'امتطاء الحصان');
   else if (nearestShop()) set('E', `متجر ${nearestShop().name}`);
   else if (nearestNPC()) set('E', `التحدث إلى ${nearestNPC().name}`);
+  else if (nearCrop()) set('F', 'حصاد المحصول 🍅');
   else if (nearLitFire()) set('C', 'الطهي على النار');
   else if (invCount('stick') >= 2) set('C', 'إشعال نار (عودان)');
   else if (nearTreeForSticks()) set('F', 'جمع الأعواد');
@@ -2319,7 +2460,7 @@ function makeNPC(rr = Math.random) {
   return g;
 }
 function spawnTownNPCs(cx, cz, group, key, r) {
-  const n = 18 + Math.floor(r() * 12);   // a crowd
+  const n = 12 + Math.floor(r() * 8);    // a lively crowd (culled when off-screen/far)
   for (let i = 0; i < n; i++) {
     const x = cx + rand(26, -26), z = cz + rand(26, -26);
     const h = terrainHeight(x, z);
@@ -2338,6 +2479,7 @@ function removeNpcsOfChunk(key) {
     if (npcs[i].key === key) { if (npcs[i].bubble) npcs[i].bubble.remove(); npcs.splice(i, 1); }
   }
   for (let i = shops.length - 1; i >= 0; i--) if (shops[i].key === key) shops.splice(i, 1);
+  for (let i = crops.length - 1; i >= 0; i--) if (crops[i].key === key) crops.splice(i, 1);
 }
 function npcSay(npc, line, dur = 3.6) {
   if (!npc.bubble) {
@@ -2631,6 +2773,8 @@ function critterSound(type, vol = 0.12) {
     case 'horse':   blip(320, 'sawtooth', 0.5, vol, 150); break;               // neigh
     case 'camel':   blip(150, 'sawtooth', 0.6, vol, 100); break;               // groan
     case 'rabbit':  blip(700, 'sine', 0.05, vol*0.5); break;
+    case 'fox':     blip(650, 'sawtooth', 0.14, vol, 1100); setTimeout(()=>blip(720,'sawtooth',0.12,vol,900),150); break; // yip
+    case 'cow':     blip(190, 'sine', 0.7, vol, 120); break;                    // moo
     default: break;
   }
 }
@@ -2722,7 +2866,7 @@ function backToMenu(){
 
 function clearChunks(){
   npcs.forEach(n => { if (n.bubble) n.bubble.remove(); });
-  npcs.length = 0; shops.length = 0; villages.length = 0;
+  npcs.length = 0; shops.length = 0; villages.length = 0; crops.length = 0;
   chunks.forEach(c => chunkGroup.remove(c));
   chunks.clear();
 }
@@ -2919,6 +3063,7 @@ function animate(){
     updateBirds(dt);
     updateInsects(dt);
     updateChunks(player.pos.x, player.pos.z);
+    cullChunks();
     manageSpawns(dt);
     maybeSpawnBear(dt);
     updateEnemies(dt);
@@ -2927,6 +3072,7 @@ function animate(){
     updateParticles(dt);
     updateProjectiles(dt);
     updateCampfires(dt);
+    updateCrops(dt);
     gatherCd = Math.max(0, gatherCd - dt);
     // vignette fade
     if (vigT > 0){ vigT -= dt; if (vigT <= 0) $('vignette').classList.remove('show'); }
@@ -2979,8 +3125,10 @@ if (location.hash.includes('debug')) {
     give3: () => { [1,2,3].forEach(i=>unlockWeapon(i)); },
     sticks: () => addItem('stick', 6),
     lightFire, cook: cookOrLight,
-    MODELS, modelKeys: () => Object.keys(MODELS),
-    giveQuest, quest: () => quest, questProgress, upgradeGood,
+    MODELS, modelKeys: () => Object.keys(MODELS), crops, chunks,
+    giveQuest, quest: () => quest, questProgress, upgradeGood, gatherCrop,
+    findFarm: () => { for (let cx=-70; cx<70; cx++) for (let cz=-70; cz<70; cz++) { if (hash2(cx+555,cz-555) > 0.9) { const ox=cx*CHUNK+CHUNK/2, oz=cz*CHUNK+CHUNK/2; const h=terrainHeight(ox,oz); if (desertFactor(ox,oz)<=0.5 && hash2(cx+999,cz-999)<=0.93 && h>WATER+2 && h<22 && terrainSlope(ox,oz)<0.26) return {x:ox,z:oz}; } } return null; },
+    visibleChunks: () => { let v=0,t=0; chunks.forEach(c=>{t++; if(c.visible)v++;}); return {visible:v,total:t}; },
     openInventory,
   };
   function isDesert2(cx,cz){ return desertFactor(cx*CHUNK+CHUNK/2, cz*CHUNK+CHUNK/2) > 0.5; }
