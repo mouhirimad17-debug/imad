@@ -204,26 +204,49 @@ const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 30
 const skyGeo = new THREE.SphereGeometry(1600, 24, 12);
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false,
+  vertexShader: `varying vec3 vp; void main(){ vp = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);} `,
   uniforms: {
     top: { value: SKY_TOP }, bottom: { value: SKY_HORIZON },
     sun: { value: new THREE.Vector3(0.5, 0.7, 0.2).normalize() },
+    night: { value: 0 },   // 0 = day, 1 = night (shows the moon)
   },
-  vertexShader: `varying vec3 vp; void main(){ vp = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);} `,
   fragmentShader: `
-    varying vec3 vp; uniform vec3 top; uniform vec3 bottom; uniform vec3 sun;
+    varying vec3 vp; uniform vec3 top; uniform vec3 bottom; uniform vec3 sun; uniform float night;
     void main(){
       float t = clamp(vp.y*1.1+0.15, 0.0, 1.0);
       vec3 col = mix(bottom, top, pow(t,0.7));
       float s = max(dot(normalize(vp), normalize(sun)),0.0);
-      col += vec3(1.0,0.9,0.7) * pow(s, 90.0) * 0.9;   // sun disc
-      col += vec3(1.0,0.85,0.6) * pow(s, 6.0) * 0.12;  // glow
+      col += vec3(1.0,0.9,0.7) * pow(s, 90.0) * 0.9 * (1.0-night);   // sun disc
+      col += vec3(1.0,0.85,0.6) * pow(s, 6.0) * 0.12 * (1.0-night);  // glow
+      float m = max(dot(normalize(vp), normalize(-sun)),0.0);
+      col += vec3(0.85,0.9,1.0) * pow(m, 200.0) * night * 1.2;       // moon disc
+      col += vec3(0.5,0.6,0.9) * pow(m, 8.0) * night * 0.08;         // moon glow
       gl_FragColor = vec4(col,1.0);
     }`
 });
 scene.add(new THREE.Mesh(skyGeo, skyMat));
 
+// starfield (visible at night)
+const starGeo = new THREE.BufferGeometry();
+{
+  const N = 900, arr = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const u = Math.random(), v = Math.random();
+    const th = u * TAU, ph = Math.acos(2*v - 1);
+    const R = 1500;
+    arr[i*3] = R*Math.sin(ph)*Math.cos(th);
+    arr[i*3+1] = Math.abs(R*Math.cos(ph)) * 0.9 + 40;   // upper hemisphere
+    arr[i*3+2] = R*Math.sin(ph)*Math.sin(th);
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+}
+const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 4, sizeAttenuation: true, transparent: true, opacity: 0, depthWrite: false }));
+stars.frustumCulled = false;
+scene.add(stars);
+
 // lights
-const sun = new THREE.DirectionalLight(0xfff2d6, 2.1);
+const SUN_MAX = 2.1;
+const sun = new THREE.DirectionalLight(0xfff2d6, SUN_MAX);
 sun.position.set(90, 140, 60);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -233,8 +256,9 @@ sun.shadow.camera.left = -SH; sun.shadow.camera.right = SH;
 sun.shadow.camera.top = SH; sun.shadow.camera.bottom = -SH;
 sun.shadow.bias = -0.0004;
 scene.add(sun); scene.add(sun.target);
-scene.add(new THREE.HemisphereLight(0xbfe0ff, 0x415e2e, 0.85));
-scene.add(new THREE.AmbientLight(0x556655, 0.25));
+const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x415e2e, 0.85);
+const amb = new THREE.AmbientLight(0x556655, 0.25);
+scene.add(hemi); scene.add(amb);
 
 // post fx (subtle bloom)
 const composer = new EffectComposer(renderer);
@@ -264,6 +288,17 @@ const MAT = {
   horse:   new THREE.MeshLambertMaterial({ color: 0x6a4526 }),
   boar:    new THREE.MeshLambertMaterial({ color: 0x53463b }),
   rabbit:  new THREE.MeshLambertMaterial({ color: 0xc9beb0 }),
+  camel:   new THREE.MeshLambertMaterial({ color: 0xc79a5b }),
+  scorp:   new THREE.MeshLambertMaterial({ color: 0x3a2418 }),
+  snake:   new THREE.MeshLambertMaterial({ color: 0x5c7a3a }),
+  chicken: new THREE.MeshLambertMaterial({ color: 0xf2ede2 }),
+  cat:     new THREE.MeshLambertMaterial({ color: 0x9a7350 }),
+  dog:     new THREE.MeshLambertMaterial({ color: 0x8a6a44 }),
+  palm:    new THREE.MeshLambertMaterial({ color: 0x7a5a2c }),
+  frond:   new THREE.MeshLambertMaterial({ color: 0x3f8a44, side: THREE.DoubleSide }),
+  bush:    new THREE.MeshLambertMaterial({ color: 0x4a7a35 }),
+  npc:     new THREE.MeshLambertMaterial({ color: 0x8a7a6a }),
+  bird:    new THREE.MeshLambertMaterial({ color: 0x33302e, side: THREE.DoubleSide }),
 };
 
 const GEO = {
@@ -429,6 +464,10 @@ function buildScatter(cx, cz, group) {
 
   // ---- desert scatter: cacti + sandstone boulders (replaces grass/trees) ----
   if (isDesert) {
+    // isolated oasis lake with palms — appears on some desert chunks
+    if (hash2(cx - 333, cz + 333) > 0.78 && terrainSlope(ox + CHUNK/2, oz + CHUNK/2) < 0.25) {
+      buildOasis(ox + CHUNK/2, oz + CHUNK/2, group, colliders);
+    }
     const cN = ft === 2 ? 3 : 6;
     const cactM = new THREE.InstancedMesh(GEO.cactus, MAT.cactus, cN);
     cactM.castShadow = cactM.receiveShadow = true;
@@ -532,6 +571,8 @@ function buildVillage(cx, cz, group, colliders) {
     group.add(house);
     if (colliders) colliders.push({ x, z, r: Math.max(w, d) * 0.55 });   // houses are solid
   }
+  // villagers who chat with each other in Arabic
+  spawnVillageNPCs(cx, cz, group, group.userData.key);
   // a golden market stall at the village centre (visual merchant spot)
   const hc = terrainHeight(cx, cz);
   const stall = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.2, 2.4),
@@ -543,10 +584,63 @@ function buildVillage(cx, cz, group, colliders) {
   group.add(stall, flag);
 }
 
+// a palm tree (trunk + radiating fronds)
+function makePalm() {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.28, 4.6, 7), MAT.palm);
+  trunk.position.y = 2.3; trunk.rotation.z = rand(0.14, -0.14); trunk.castShadow = true;
+  g.add(trunk);
+  const frondGeo = new THREE.PlaneGeometry(2.6, 0.7); frondGeo.translate(1.2, 0, 0);
+  for (let i = 0; i < 7; i++) {
+    const f = new THREE.Mesh(frondGeo, MAT.frond);
+    f.position.y = 4.5; f.rotation.y = (i / 7) * TAU; f.rotation.z = -0.5 + rand(0.18, -0.18);
+    f.castShadow = true; g.add(f);
+  }
+  return g;
+}
+
+// an isolated desert lake (oasis) with palms + shrubs around it
+function buildOasis(cx, cz, group, colliders) {
+  const r = rng(((cx*15485863) ^ (cz*32452843)) >>> 0);
+  const hc = terrainHeight(cx, cz);
+  const rad = 8 + r() * 4;
+  // water disc
+  const pond = new THREE.Mesh(new THREE.CircleGeometry(rad, 24),
+    new THREE.MeshStandardMaterial({ color: 0x2f7f9a, transparent: true, opacity: 0.82, roughness: 0.1, metalness: 0.2 }));
+  pond.rotation.x = -Math.PI / 2; pond.position.set(cx, hc - 0.35, cz);
+  group.add(pond);
+  group.userData.oasis = { x: cx, z: cz, r: rad };
+  // damp sand ring
+  const ring = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 2.5, 24),
+    new THREE.MeshLambertMaterial({ color: 0x8a6a3a }));
+  ring.rotation.x = -Math.PI / 2; ring.position.set(cx, hc - 0.05, cz);
+  group.add(ring);
+  // palms + shrubs around the shoreline
+  const nP = 5 + Math.floor(r() * 4);
+  for (let i = 0; i < nP; i++) {
+    const a = r() * TAU, d = rad + 1.5 + r() * 4;
+    const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+    const h = terrainHeight(x, z);
+    const palm = makePalm(); palm.position.set(x, h, z); palm.scale.setScalar(0.8 + r() * 0.5);
+    group.add(palm);
+    colliders.push({ x, z, r: 0.4 });
+  }
+  const nB = 6 + Math.floor(r() * 6);
+  for (let i = 0; i < nB; i++) {
+    const a = r() * TAU, d = rad + r() * 6;
+    const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+    const h = terrainHeight(x, z);
+    const bush = new THREE.Mesh(new THREE.SphereGeometry(0.5 + r() * 0.6, 6, 5), MAT.bush);
+    bush.position.set(x, h + 0.3, z); bush.scale.y = 0.7; bush.castShadow = true;
+    group.add(bush);
+  }
+}
+
 function ensureChunk(cx, cz) {
   const key = chunkKey(cx, cz);
   if (chunks.has(key)) { chunks.get(key).keep = true; return; }
   const group = new THREE.Group();
+  group.userData.key = key;
   group.add(buildTerrainMesh(cx, cz));
   buildScatter(cx, cz, group);
   group.keep = true;
@@ -571,6 +665,7 @@ function updateChunks(px, pz) {
       c.children.forEach(o => {
         if (o.isMesh && (o.material.vertexColors || o.userData.isWater)) o.geometry.dispose();
       });
+      if (villages.length) removeNpcsOfChunk(key);
       chunks.delete(key);
     }
   });
@@ -964,6 +1059,26 @@ function makeQuadruped(bodyMatShared, size) {
   return g;
 }
 
+// a snake: a chain of segments that undulates as it moves
+function makeSnake(mat, size) {
+  const g = new THREE.Group();
+  const m = mat.clone(); g.userData.mat = m;
+  const segs = [];
+  const n = 7;
+  for (let i = 0; i < n; i++) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(size * (0.5 - i * 0.03), 6, 6), m);
+    s.position.set(-i * size * 0.7, size * 0.35, 0);
+    s.castShadow = true;
+    g.add(s); segs.push(s);
+  }
+  // head bump
+  const head = new THREE.Mesh(new THREE.SphereGeometry(size * 0.55, 6, 6), m);
+  head.position.set(size * 0.6, size * 0.35, 0); head.scale.set(1.2, 0.8, 1); head.castShadow = true;
+  g.add(head);
+  g.userData.segs = segs;
+  return g;
+}
+
 function spawnEnemy(type, x, z) {
   const h = terrainHeight(x, z);
   let mesh, hp, dmg, speed, radius, aggro, xp, name;
@@ -989,10 +1104,37 @@ function spawnEnemy(type, x, z) {
     hp = 100; dmg = 16; speed = 6.2; radius = 1.2; xp = 55; name='خنزير بري'; hostile = true;
   } else if (type === 'horse') {
     mesh = makeQuadruped(MAT.horse, 1.15);
-    // simple mane
     const mane = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.5), MAT.trunk);
     mane.position.set(1.0, 2.0, 0); mesh.add(mane);
     hp = 220; dmg = 0; speed = 8; radius = 1.5; xp = 0; name='حصان'; rideable = true;
+  } else if (type === 'camel') {
+    mesh = makeQuadruped(MAT.camel, 1.25);
+    const hump = new THREE.Mesh(new THREE.SphereGeometry(0.7, 8, 8), MAT.camel);
+    hump.position.set(0, 3.1, 0); hump.scale.y = 0.7; mesh.add(hump);
+    hp = 260; dmg = 0; speed = 7.5; radius = 1.6; xp = 0; name='جمل'; rideable = true;
+  } else if (type === 'chicken') {
+    mesh = makeQuadruped(MAT.chicken, 0.28);
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.14, 4), MAT.drock);
+    beak.position.set(0.42, 0.5, 0); beak.rotation.z = -1.57; mesh.add(beak);
+    hp = 10; dmg = 0; speed = 5; radius = 0.45; xp = 6; name='دجاجة'; flees = true;
+  } else if (type === 'cat') {
+    mesh = makeQuadruped(MAT.cat, 0.4);
+    const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.6, 4), MAT.cat);
+    tail.position.set(-0.6, 0.7, 0); tail.rotation.z = 0.7; mesh.add(tail);
+    hp = 22; dmg = 0; speed = 5.5; radius = 0.6; xp = 10; name='قط';   // calm
+  } else if (type === 'dog') {
+    mesh = makeQuadruped(MAT.dog, 0.55);
+    const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.5, 4), MAT.dog);
+    tail.position.set(-0.75, 1.0, 0); tail.rotation.z = 0.9; mesh.add(tail);
+    hp = 40; dmg = 0; speed = 6.5; radius = 0.8; xp = 14; name='كلب';  // calm
+  } else if (type === 'snake') {
+    mesh = makeSnake(MAT.snake, 0.4);
+    hp = 24; dmg = 10; speed = 4.5; radius = 0.6; xp = 18; name='أفعى'; hostile = true;
+  } else if (type === 'scorpion') {
+    mesh = makeQuadruped(MAT.scorp, 0.3);
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.5, 4), MAT.scorp);
+    tail.position.set(-0.5, 0.8, 0); tail.rotation.z = -1.0; mesh.add(tail);
+    hp = 30; dmg = 12; speed = 4.8; radius = 0.6; xp = 20; name='عقرب'; hostile = true;
   } else { // bear boss
     mesh = makeQuadruped(MAT.fur, 1.8);
     hp = 2600; dmg = 34; speed = 4.6; radius = 2.6; xp = 1000; name='الدب الأسطوري'; hostile = true;
@@ -1089,8 +1231,9 @@ function updateEnemies(dt) {
         move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
         e.speedCur = 1.6;
       }
-    } else { // wolf / boar / bear
-      if (dist < 40 || e.aggro) {
+    } else { // wolf / boar / bear / snake / scorpion
+      const notice = e.radius < 0.8 ? 13 : 40;   // small predators notice up close
+      if (dist < notice || e.aggro) {
         e.aggro = true;
         if (dist > (e.radius + 1.6)) {       // chase
           move.copy(dirToPlayer); e.speedCur = e.speed;
@@ -1132,6 +1275,11 @@ function lungeEnemy(e, dir) {
 }
 function walkAnim(e, speed, dt) {
   e.walkT = (e.walkT || 0) + dt * speed * 1.4;
+  const segs = e.mesh.userData.segs;
+  if (segs) {   // snake — undulate the body sideways
+    segs.forEach((s, k) => { s.position.z = Math.sin(e.walkT * 0.8 + k * 0.8) * 0.25; });
+    return;
+  }
   const legs = e.mesh.userData.legs;
   if (!legs) return;
   legs.forEach((leg, k) => {
@@ -1152,15 +1300,26 @@ function manageSpawns(dt) {
     const h = terrainHeight(x, z);
     if (h > WATER + 1 && h < 40) {
       const desert = desertFactor(x, z) > 0.5;
-      const horses = enemies.filter(e => e.alive && e.rideable).length;
+      const mounts = enemies.filter(e => e.alive && e.rideable).length;
       const r = Math.random();
       let t;
-      if (desert) t = r < 0.5 ? 'boar' : r < 0.8 ? 'rabbit' : 'wolf';           // desert wildlife
-      else if (r < 0.30) t = 'deer';
-      else if (r < 0.50) t = 'rabbit';
-      else if (r < 0.70) t = 'wolf';
-      else if (r < 0.85) t = 'boar';
-      else t = horses < 3 ? 'horse' : 'deer';                                    // keep a few horses around
+      if (desert) {                                                              // desert wildlife
+        if (r < 0.28) t = 'scorpion';
+        else if (r < 0.48) t = 'snake';
+        else if (r < 0.66) t = 'rabbit';
+        else if (r < 0.82) t = 'wolf';
+        else t = mounts < 2 ? 'camel' : 'boar';                                  // camels to ride
+      } else {                                                                   // forest wildlife
+        if (r < 0.18) t = 'deer';
+        else if (r < 0.32) t = 'rabbit';
+        else if (r < 0.44) t = 'chicken';
+        else if (r < 0.52) t = 'cat';
+        else if (r < 0.60) t = 'dog';
+        else if (r < 0.70) t = 'snake';
+        else if (r < 0.82) t = 'wolf';
+        else if (r < 0.92) t = 'boar';
+        else t = mounts < 3 ? 'horse' : 'deer';                                  // keep horses around
+      }
       spawnEnemy(t, x, z);
     }
   }
@@ -1477,7 +1636,8 @@ function updatePrompt() {
  * -------------------------------------------------------------------------- */
 const weather = { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, rain:0, rainTarget:0, mode:'صباح ضبابي', timer:18 };
 function resetWeather() {
-  Object.assign(weather, { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, rain:0, rainTarget:0, mode:'صباح ضبابي', timer:18 });
+  Object.assign(weather, { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, rain:0, rainTarget:0, lightMul:1, mode:'صباح ضبابي', timer:18 });
+  timeOfDay = 0.12;   // start in the morning
 }
 function pickWeather() {
   const r = Math.random();
@@ -1503,7 +1663,7 @@ function updateWeather(dt) {
   scene.fog.far  = lerp(CHUNK * (VIEW + 0.6), CHUNK * 1.5, weather.fog);
   const stormy = weather.mode === 'عاصفة' || weather.mode === 'عاصفة رعدية';
   const dark = stormy ? 0.5 : weather.rain > 0.3 ? 0.72 : 1;
-  sun.intensity = lerp(sun.intensity, 2.1 * dark, dt * 2);
+  weather.lightMul = lerp(weather.lightMul ?? 1, dark, dt * 2);   // day/night applies this
   if (ambientNode) ambientNode.gain.value = 0.03 + weather.wind * 0.06 + weather.rain * 0.05;
   updateSnow(dt);
   updateRain(dt);
@@ -1574,6 +1734,239 @@ function updateRain(dt) {
   }
   rainLines.geometry.attributes.position.needsUpdate = true;
   rainLines.position.set(player.pos.x, player.pos.y, player.pos.z);
+}
+
+/* ----------------------------------------------------------------------------
+ * 9f. Day / night cycle
+ * -------------------------------------------------------------------------- */
+const DAY_LEN = 200;          // seconds for a full day↔night cycle
+let timeOfDay = 0.15;         // 0=dawn, .25=noon, .5=dusk, .75=midnight
+const _sunDir = new THREE.Vector3();
+// palette anchors
+const DAY_TOP = new THREE.Color(0x8ec3e8), DAY_BOT = new THREE.Color(0xcfe0dc);
+const NIGHT_TOP = new THREE.Color(0x070c1c), NIGHT_BOT = new THREE.Color(0x121a33);
+const DUSK_TOP = new THREE.Color(0x5a4a6a), DUSK_BOT = new THREE.Color(0xe8895a);
+const _tmpTop = new THREE.Color(), _tmpBot = new THREE.Color(), _fogC = new THREE.Color();
+function updateDayNight(dt) {
+  timeOfDay = (timeOfDay + dt / DAY_LEN) % 1;
+  const ang = timeOfDay * TAU;                 // sun orbit
+  _sunDir.set(Math.cos(ang) * 0.5, Math.sin(ang), 0.32).normalize();
+  sun.position.set(player.pos.x + _sunDir.x * 140, _sunDir.y * 150 + 12, player.pos.z + _sunDir.z * 140);
+  sun.target.position.set(player.pos.x, 0, player.pos.z);
+  skyMat.uniforms.sun.value.copy(_sunDir);
+
+  const day = clamp(_sunDir.y * 2.2 + 0.15, 0, 1);      // 1 midday → 0 night
+  const dusk = clamp(1 - Math.abs(_sunDir.y) * 5, 0, 1); // peaks at horizon
+  const night = clamp(1 - (_sunDir.y * 3 + 0.5), 0, 1);
+
+  // sky colours: night → dusk → day
+  _tmpTop.copy(NIGHT_TOP).lerp(DAY_TOP, day).lerp(DUSK_TOP, dusk * 0.6);
+  _tmpBot.copy(NIGHT_BOT).lerp(DAY_BOT, day).lerp(DUSK_BOT, dusk * 0.7);
+  skyMat.uniforms.top.value.copy(_tmpTop);
+  skyMat.uniforms.bottom.value.copy(_tmpBot);
+  skyMat.uniforms.night.value = night;
+  scene.background.copy(_tmpTop);
+  // fog tracks the sky bottom (dimmer at night), tinted by weather a touch
+  _fogC.copy(_tmpBot).multiplyScalar(lerp(0.7, 1, day));
+  scene.fog.color.copy(_fogC);
+
+  // lights
+  const wm = weather.lightMul ?? 1;
+  sun.intensity = lerp(sun.intensity, SUN_MAX * (0.05 + day * 0.95) * wm, dt * 2);
+  sun.color.setRGB(1, lerp(0.82, 0.95, day), lerp(0.62, 0.84, day) + dusk * 0.06);
+  hemi.intensity = lerp(hemi.intensity, (0.12 + day * 0.73) * wm, dt * 2);
+  amb.intensity = lerp(amb.intensity, 0.12 + day * 0.16, dt * 2);
+  stars.material.opacity = night;
+  stars.position.copy(player.pos);
+
+  // HUD clock
+  const hr = Math.floor(((timeOfDay + 0.25) % 1) * 24);
+  const icon = day > 0.35 ? '☀️' : night > 0.5 ? '🌙' : '🌆';
+  const el = document.getElementById('w-time');
+  if (el) el.textContent = `${icon} ${String(hr).padStart(2,'0')}:00`;
+}
+
+/* ----------------------------------------------------------------------------
+ * 9g. Ambient life — birds, insects
+ * -------------------------------------------------------------------------- */
+const birds = [];
+function makeBird() {
+  const g = new THREE.Group();
+  const wingGeo = new THREE.PlaneGeometry(0.9, 0.4);
+  const lw = new THREE.Mesh(wingGeo, MAT.bird); lw.position.x = -0.45;
+  const rw = new THREE.Mesh(wingGeo, MAT.bird); rw.position.x = 0.45;
+  g.add(lw, rw); g.userData.lw = lw; g.userData.rw = rw;
+  return g;
+}
+function initBirds() {
+  for (let i = 0; i < 7; i++) {
+    const m = makeBird(); m.frustumCulled = false; scene.add(m);
+    birds.push({ mesh: m, ang: rand(TAU), r: rand(45, 18), h: rand(34, 20), sp: rand(0.5, 0.25), flap: rand(TAU),
+                 cx: 0, cz: 0 });
+  }
+}
+function updateBirds(dt) {
+  for (const b of birds) {
+    // circle centre drifts to follow the player
+    b.cx = lerp(b.cx, player.pos.x, dt * 0.3);
+    b.cz = lerp(b.cz, player.pos.z, dt * 0.3);
+    b.ang += dt * b.sp;
+    b.flap += dt * 10;
+    const x = b.cx + Math.cos(b.ang) * b.r, z = b.cz + Math.sin(b.ang) * b.r;
+    const y = terrainHeight(x, z) + b.h;
+    b.mesh.position.set(x, y, z);
+    b.mesh.rotation.y = -b.ang;
+    const f = Math.sin(b.flap) * 0.6;
+    b.mesh.userData.lw.rotation.z = f; b.mesh.userData.rw.rotation.z = -f;
+  }
+}
+
+// insects: a small jittering point swarm near the player (forest, daytime)
+let insectPts = null, insectPos = null;
+const INSECT_N = 80;
+function initInsects() {
+  insectPos = new Float32Array(INSECT_N * 3);
+  for (let i = 0; i < INSECT_N; i++) { insectPos[i*3]=rand(3,-3); insectPos[i*3+1]=rand(2.4,0.6); insectPos[i*3+2]=rand(3,-3); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(insectPos, 3));
+  insectPts = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x2a2a1e, size: 0.08, transparent: true, opacity: 0.8, depthWrite: false }));
+  insectPts.frustumCulled = false; scene.add(insectPts);
+}
+function updateInsects(dt) {
+  if (!insectPts) return;
+  const desert = desertFactor(player.pos.x, player.pos.z) > 0.5;
+  const dayl = clamp(_sunDir.y * 2, 0, 1);
+  insectPts.visible = !desert && dayl > 0.3;
+  if (!insectPts.visible) return;
+  for (let i = 0; i < INSECT_N; i++) {
+    insectPos[i*3]   += Math.sin((elapsed*3 + i*7)) * dt * 0.6 + rand(0.1,-0.1)*dt;
+    insectPos[i*3+1] += Math.cos((elapsed*4 + i*3)) * dt * 0.4;
+    insectPos[i*3+2] += Math.cos((elapsed*3 + i*5)) * dt * 0.6;
+    // keep within a small box
+    for (const o of [0,1,2]) {
+      const lo = o===1?0.4:-3.5, hi = o===1?2.6:3.5;
+      if (insectPos[i*3+o] < lo) insectPos[i*3+o] = hi;
+      if (insectPos[i*3+o] > hi) insectPos[i*3+o] = lo;
+    }
+  }
+  insectPts.geometry.attributes.position.needsUpdate = true;
+  insectPts.position.set(player.pos.x, player.pos.y, player.pos.z);
+}
+
+/* ----------------------------------------------------------------------------
+ * 9h. Village NPCs + Arabic dialogue
+ * -------------------------------------------------------------------------- */
+const npcs = [];
+const NPC_NAMES = ['أبو يوسف', 'سالم', 'مريم', 'خالد', 'فاطمة', 'إدريس', 'العربي', 'زينب'];
+const NPC_LINES = [
+  'السلام عليكم يا جاري.',
+  'وعليكم السلام، كيف حالك اليوم؟',
+  'الحمد لله، الحصاد كان وفيراً هذا العام.',
+  'احذر، رأيت ذئاباً قرب النهر البارحة.',
+  'هل سمعت عن الدب الأسطوري في أعماق الغابة؟',
+  'يقولون إن من يهزمه ينال كنزاً عظيماً.',
+  'التاجر جلب أسلحة جديدة، مرّ عليه.',
+  'الطقس متقلب، قد تمطر الليلة.',
+  'الأطفال ذهبوا لصيد السمك في البحيرة.',
+  'لا تقترب من الصحراء وحدك، هناك عقارب.',
+  'ليلة أمس كانت باردة، الثلج قادم.',
+  'بارك الله في يومك يا صديقي.',
+  'اشترِ حصاناً، يسهّل التنقل كثيراً.',
+  'الغابة تخفي أسراراً كثيرة.',
+];
+function makeNPC() {
+  const g = new THREE.Group();
+  const mat = MAT.npc.clone();
+  const robe = new THREE.Color().setHSL(rand(1), 0.35, rand(0.55, 0.35));
+  mat.color.copy(robe);
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.42, 1.4, 8), mat);
+  body.position.y = 0.7; body.castShadow = true;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 8), new THREE.MeshLambertMaterial({ color: 0xc9a67e }));
+  head.position.y = 1.6; head.castShadow = true;
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6, 0, TAU, 0, 1.2), mat.clone());
+  cap.position.y = 1.68;
+  g.add(body, head, cap);
+  return g;
+}
+function spawnVillageNPCs(cx, cz, group, key) {
+  const r = rng(((cx*7919) ^ (cz*104729)) >>> 0);
+  const n = 2 + Math.floor(r() * 3);
+  for (let i = 0; i < n; i++) {
+    const a = r() * TAU, d = 3 + r() * 9;
+    const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+    const h = terrainHeight(x, z);
+    if (h < WATER + 1) continue;
+    const mesh = makeNPC();
+    mesh.position.set(x, h, z);
+    mesh.rotation.y = r() * TAU;
+    group.add(mesh);
+    npcs.push({ mesh, key, name: NPC_NAMES[Math.floor(r()*NPC_NAMES.length)],
+                homeX: x, homeZ: z, talkT: rand(10, 2), sayUntil: 0, bubble: null,
+                wanderT: rand(4), wanderDir: rand(TAU) });
+  }
+}
+function removeNpcsOfChunk(key) {
+  for (let i = npcs.length - 1; i >= 0; i--) {
+    if (npcs[i].key === key) { if (npcs[i].bubble) npcs[i].bubble.remove(); npcs.splice(i, 1); }
+  }
+}
+function npcSay(npc, line, dur = 3.6) {
+  if (!npc.bubble) {
+    npc.bubble = document.createElement('div');
+    npc.bubble.className = 'npc-bubble';
+    document.getElementById('npc-bubbles').appendChild(npc.bubble);
+  }
+  npc.bubble.innerHTML = `<b>${npc.name}</b>${line}`;
+  npc.sayUntil = elapsed + dur;
+}
+const _np = new THREE.Vector3();
+function updateNPCs(dt) {
+  camera.updateMatrixWorld();
+  for (const npc of npcs) {
+    // gentle wander near home
+    npc.wanderT -= dt;
+    if (npc.wanderT <= 0) { npc.wanderT = rand(5, 2); npc.wanderDir = rand(TAU); }
+    const nx = npc.mesh.position.x + Math.cos(npc.wanderDir) * 0.6 * dt;
+    const nz = npc.mesh.position.z + Math.sin(npc.wanderDir) * 0.6 * dt;
+    if (Math.hypot(nx - npc.homeX, nz - npc.homeZ) < 7) {
+      npc.mesh.position.x = nx; npc.mesh.position.z = nz;
+      npc.mesh.rotation.y = Math.atan2(Math.cos(npc.wanderDir), Math.sin(npc.wanderDir));
+    }
+    npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z);
+
+    // conversation: speak on a timer, prompt a nearby neighbour to reply
+    npc.talkT -= dt;
+    if (npc.talkT <= 0) {
+      npc.talkT = rand(14, 7);
+      npcSay(npc, NPC_LINES[Math.floor(rand(NPC_LINES.length))]);
+      // face and cue nearest neighbour to reply
+      let other = null, bd = 8;
+      for (const o of npcs) {
+        if (o === npc || o.key !== npc.key) continue;
+        const d = Math.hypot(o.mesh.position.x - npc.mesh.position.x, o.mesh.position.z - npc.mesh.position.z);
+        if (d < bd) { bd = d; other = o; }
+      }
+      if (other) {
+        npc.mesh.lookAt(other.mesh.position.x, npc.mesh.position.y + 1.6, other.mesh.position.z);
+        other.talkT = 2.2;   // replies shortly
+      }
+    }
+
+    // position the speech bubble (project head to screen)
+    if (npc.bubble) {
+      if (elapsed > npc.sayUntil) { npc.bubble.remove(); npc.bubble = null; continue; }
+      _np.set(npc.mesh.position.x, npc.mesh.position.y + 2.3, npc.mesh.position.z);
+      const dist = _np.distanceTo(player.pos);
+      _np.project(camera);
+      if (_np.z < 1 && dist < 38) {
+        const sx = (_np.x * 0.5 + 0.5) * innerWidth;
+        const sy = (-_np.y * 0.5 + 0.5) * innerHeight;
+        npc.bubble.style.display = 'block';
+        npc.bubble.style.left = sx + 'px';
+        npc.bubble.style.top = sy + 'px';
+        npc.bubble.style.opacity = clamp(1 - (dist - 25) / 13, 0, 1);
+      } else npc.bubble.style.display = 'none';
+    }
+  }
 }
 
 /* ----------------------------------------------------------------------------
@@ -1879,6 +2272,7 @@ function clearEntities(){
   fish.forEach(f => scene.remove(f.mesh)); fish.length = 0;
   particles.forEach(p => scene.remove(p.mesh)); particles.length = 0;
   projectiles.forEach(p => scene.remove(p.mesh)); projectiles.length = 0;
+  npcs.forEach(n => { if (n.bubble) { n.bubble.remove(); n.bubble = null; } });
   bear = null; hideBossBar();
 }
 
@@ -1906,6 +2300,8 @@ function maybeSpawnBear(dt){
 buildWeaponModel(0);   // start empty-handed (fists)
 initSnow();
 initRain();
+initBirds();
+initInsects();
 const clock = new THREE.Clock();
 
 function animate(){
@@ -1929,6 +2325,10 @@ function animate(){
     updateWeaponAnim(dt);
     updateFishing(dt);
     updateWeather(dt);
+    updateDayNight(dt);
+    updateNPCs(dt);
+    updateBirds(dt);
+    updateInsects(dt);
     updateChunks(player.pos.x, player.pos.z);
     manageSpawns(dt);
     maybeSpawnBear(dt);
@@ -1977,6 +2377,8 @@ if (location.hash.includes('debug')) {
     villageHere: () => villages.push({ x: player.pos.x + 3, z: player.pos.z }),
     setWeather: (m) => { weather.timer = 999; Object.assign(weather, m); },
     spawn: (type = 'horse') => spawnEnemy(type, player.pos.x + 3, player.pos.z + 1),
+    setTime: (t) => { timeOfDay = t; },
+    npcs, birds,
     mount: () => toggleMount(),
     tp: (x, z) => { player.pos.set(x, terrainHeight(x, z) + player.height + 2, z); updateChunks(x, z); },
     findDesert: () => { for (let d = 200; d < 6000; d += 120) for (let a = 0; a < 6.28; a += 0.5) { const x = Math.cos(a)*d, z = Math.sin(a)*d; if (desertFactor(x, z) > 0.6) return { x: Math.round(x), z: Math.round(z) }; } return null; },

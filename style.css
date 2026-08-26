@@ -190,6 +190,7 @@ canvas#scene{position:fixed; inset:0; width:100%; height:100%; display:block; z-
 .w-mode{font-size:14px; font-weight:800; color:#dff0ff}
 .w-wind{font-size:12px; color:#bcd6bb}
 .w-wind b{color:#9fd0e0}
+.w-time{font-size:12px; color:#e6d29a; font-weight:800; margin-top:2px}
 
 /* interaction prompt */
 #prompt{position:absolute; left:50%; bottom:110px; transform:translateX(-50%);
@@ -259,6 +260,16 @@ canvas#scene{position:fixed; inset:0; width:100%; height:100%; display:block; z-
 .toast.epic{border-color:#b06bff; color:#e6d2ff}
 .toast.legendary{border-color:var(--gold); color:#fff0c2; box-shadow:0 8px 26px rgba(230,193,90,.4)}
 .toast .r{font-size:11px; opacity:.8; letter-spacing:.1em}
+
+/* NPC speech bubbles */
+#npc-bubbles{position:absolute; inset:0; pointer-events:none; overflow:hidden}
+.npc-bubble{position:absolute; transform:translate(-50%,-100%);
+  background:rgba(12,22,14,.9); border:1px solid var(--stroke); border-radius:12px;
+  padding:6px 12px; font-size:13px; color:#eafff0; white-space:nowrap; max-width:280px;
+  box-shadow:0 6px 18px rgba(0,0,0,.45); transition:opacity .2s}
+.npc-bubble::after{content:''; position:absolute; left:50%; bottom:-7px; transform:translateX(-50%);
+  border:7px solid transparent; border-top-color:rgba(12,22,14,.9); border-bottom:0}
+.npc-bubble b{display:block; font-size:11px; color:var(--gold); margin-bottom:1px}
 
 /* ============================ anims ============================ */
 @keyframes rise{from{opacity:0; transform:translateY(24px)}to{opacity:1; transform:none}}
