@@ -58,16 +58,8 @@
     </div>
   </div>
 
-  <!-- bottom-center: weapon wheel -->
-  <div id="weapons">
-    <div class="wslot" data-slot="0"><span class="wkey">1</span><span class="wico">👊</span><span class="wname">قبضة</span></div>
-    <div class="wslot locked" data-slot="1"><span class="wkey">2</span><span class="wico">🗡️</span><span class="wname">خنجر</span><span class="wlock">🔒</span></div>
-    <div class="wslot locked" data-slot="2"><span class="wkey">3</span><span class="wico">⚔️</span><span class="wname">سيف</span><span class="wlock">🔒</span></div>
-    <div class="wslot locked" data-slot="3"><span class="wkey">4</span><span class="wico">🔱</span><span class="wname">رمح</span><span class="wlock">🔒</span></div>
-    <div class="wslot locked" data-slot="4"><span class="wkey">5</span><span class="wico">🪓</span><span class="wname">فأس</span><span class="wlock">🔒</span></div>
-    <div class="wslot locked" data-slot="5"><span class="wkey">6</span><span class="wico">🔨</span><span class="wname">مطرقة</span><span class="wlock">🔒</span></div>
-    <div class="wslot locked" data-slot="6"><span class="wkey">7</span><span class="wico">🏹</span><span class="wname">قوس</span><span class="wlock">🔒</span></div>
-  </div>
+  <!-- bottom-center: current weapon badge (press Q for the wheel) -->
+  <div id="cur-weapon"><span class="cw-ico">👊</span><span class="cw-name">قبضة</span><span class="cw-key">Q للأسلحة</span></div>
 
   <!-- weather indicator -->
   <div id="weather">
@@ -91,6 +83,25 @@
 
   <!-- NPC speech bubbles (positioned in screen space) -->
   <div id="npc-bubbles"></div>
+
+  <!-- radial weapon wheel (hold Q) -->
+  <div id="weapon-wheel" class="hidden">
+    <div class="ww-center">
+      <div id="ww-label">—</div>
+      <div class="ww-hint">حرّك الفأرة أو الأرقام · أفلت Q للاختيار</div>
+    </div>
+    <div id="ww-ring"></div>
+  </div>
+</div>
+
+<!-- ===================== NPC DIALOGUE ===================== -->
+<div id="dialogue" class="hidden">
+  <div class="dlg-card">
+    <button class="inv-close" id="dlg-close">✕</button>
+    <div class="dlg-head"><span class="dlg-portrait">🧑</span><b id="dlg-name">—</b></div>
+    <div class="dlg-text" id="dlg-text">…</div>
+    <div class="dlg-options" id="dlg-options"></div>
+  </div>
 </div>
 
 <!-- ===================== MAIN MENU (AAA) ===================== -->
@@ -136,9 +147,11 @@
       <li><kbd>زر أيسر</kbd><span>هجوم · صيد بالرمح قرب الماء</span></li>
       <li><kbd>Shift</kbd><span>ركض</span></li>
       <li><kbd>Space</kbd><span>قفز</span></li>
-      <li><kbd>1 2 3 4</kbd><span>قبضة / خنجر / سيف / رمح</span></li>
-      <li><kbd>F</kbd><span>التقاط اللوت</span></li>
-      <li><kbd>E</kbd><span>المتجر (قرب القرية)</span></li>
+      <li><kbd>Q</kbd><span>عجلة الأسلحة (اضغط واختر وأفلت)</span></li>
+      <li><kbd>1 … 7</kbd><span>اختيار سلاح مباشرة</span></li>
+      <li><kbd>F</kbd><span>التقاط اللوت / جمع الأعواد</span></li>
+      <li><kbd>C</kbd><span>إشعال النار / الطهي</span></li>
+      <li><kbd>E</kbd><span>المتجر / التحدث مع الناس</span></li>
       <li><kbd>I / Tab</kbd><span>المحفظة</span></li>
       <li><kbd>Esc</kbd><span>إيقاف مؤقت</span></li>
     </ul>
