@@ -136,7 +136,15 @@ function terrainHeight(x, z) {
   const river = Math.abs(fbm(x * 0.0012 - 300, z * 0.0012 + 220, 3) - 0.5);
   const carve = smooth(clamp(1 - river * 9, 0, 1)) * 9;
   h -= carve;
+  // desert dunes
+  const dez = desertFactor(x, z);
+  if (dez > 0) h += dez * (fbm(x * 0.02 + 900, z * 0.02 - 60, 2) - 0.4) * 9;
   return h;
+}
+// desert region mask 0..1 (large-scale patch on the map)
+function desertFactor(x, z) {
+  const n = fbm(x * 0.00085 - 800, z * 0.00085 + 640, 3);
+  return smooth(clamp((n - 0.57) * 4.5, 0, 1));
 }
 // approximate slope 0..1 by sampling neighbours
 function terrainSlope(x, z) {
@@ -148,7 +156,8 @@ function terrainSlope(x, z) {
 
 // biome vertex colour
 const _c = new THREE.Color();
-function biomeColor(h, slope, out) {
+const _sand = new THREE.Color();
+function biomeColor(h, slope, dez, out) {
   if (h < WATER + 0.6) {           // sand / shore
     out.setRGB(0.72, 0.66, 0.44);
   } else if (h > 46) {             // snow peaks
@@ -162,6 +171,11 @@ function biomeColor(h, slope, out) {
   }
   // rocky patches on steep grass
   if (slope > 0.5 && h < 34) out.lerp(_c.setRGB(0.34,0.32,0.29), (slope - 0.5) * 2);
+  // desert → warm sand (keeps rock on steep cliffs)
+  if (dez > 0 && h > WATER + 0.3 && slope < 0.6) {
+    const g = 0.86 + fbm(h * 0.5, slope, 2) * 0.12;
+    out.lerp(_sand.setRGB(0.82 * g, 0.71 * g, 0.44 * g), dez);
+  }
   return out;
 }
 
@@ -245,6 +259,11 @@ const MAT = {
   wolf:    new THREE.MeshLambertMaterial({ color: 0x6e6e74 }),
   fish:    new THREE.MeshLambertMaterial({ color: 0x9fb6c9 }),
   petal:   new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
+  cactus:  new THREE.MeshLambertMaterial({ color: 0x3f7d43 }),
+  drock:   new THREE.MeshLambertMaterial({ color: 0xb08a55 }),   // desert rock
+  horse:   new THREE.MeshLambertMaterial({ color: 0x6a4526 }),
+  boar:    new THREE.MeshLambertMaterial({ color: 0x53463b }),
+  rabbit:  new THREE.MeshLambertMaterial({ color: 0xc9beb0 }),
 };
 
 const GEO = {
@@ -260,6 +279,15 @@ const GEO = {
     return mergeGeos(a, b);
   })(),
   flower: new THREE.CircleGeometry(0.22, 5),
+  cactus: (() => {
+    // saguaro: a tall body + two arms, merged into one geometry
+    const body = new THREE.CylinderGeometry(0.4, 0.5, 3.2, 7); body.translate(0, 1.6, 0);
+    const armL = new THREE.CylinderGeometry(0.22, 0.24, 1.3, 6); armL.rotateZ(0.5); armL.translate(-0.55, 1.9, 0);
+    const armLu = new THREE.CylinderGeometry(0.22, 0.22, 0.9, 6); armLu.translate(-0.85, 2.6, 0);
+    const armR = new THREE.CylinderGeometry(0.22, 0.24, 1.1, 6); armR.rotateZ(-0.5); armR.translate(0.5, 2.1, 0);
+    return mergeGeos(mergeGeos(mergeGeos(body, armL), armLu), armR);
+  })(),
+  drock:  new THREE.DodecahedronGeometry(1, 0),
 };
 GEO.trunk.translate(0, 2.5, 0);
 GEO.pine1.translate(0, 5.4, 0);
@@ -313,7 +341,7 @@ function buildTerrainMesh(cx, cz) {
     const wz = oz + pos.getZ(i);
     const h = terrainHeight(wx, wz);
     pos.setY(i, h);
-    biomeColor(h, terrainSlope(wx, wz), _c);
+    biomeColor(h, terrainSlope(wx, wz), desertFactor(wx, wz), _c);
     colors[i*3] = _c.r; colors[i*3+1] = _c.g; colors[i*3+2] = _c.b;
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -346,17 +374,20 @@ function buildScatter(cx, cz, group) {
   // decide biome density from average height + forest type
   const midH = terrainHeight(ox + CHUNK/2, oz + CHUNK/2);
   const ft = forestType(cx, cz);
+  const dez = desertFactor(ox + CHUNK/2, oz + CHUNK/2);
+  const isDesert = dez > 0.5;
   group.userData.forestType = ft;
+  group.userData.isDesert = isDesert;
 
-  // ---- village? rare, on flattish low-mid land ----
-  if (hash2(cx + 999, cz - 999) > 0.93 && midH > WATER + 3 && midH < 26) {
+  // ---- village? rare, on flattish low-mid land (not in deep desert) ----
+  if (!isDesert && hash2(cx + 999, cz - 999) > 0.93 && midH > WATER + 3 && midH < 26) {
     buildVillage(ox + CHUNK/2, oz + CHUNK/2, group, colliders);
     villages.push({ x: ox + CHUNK/2, z: oz + CHUNK/2 });
   }
 
-  // ---- trees (density by forest type) ----
+  // ---- trees (density by forest type; none in desert) ----
   //   0 dense ≈ 46, 1 medium ≈ 20, 2 sparse ≈ 2 (≈4 trees / 100m×100m)
-  let treeN = ft === 0 ? 46 : ft === 1 ? 20 : 2;
+  let treeN = isDesert ? 0 : (ft === 0 ? 46 : ft === 1 ? 20 : 2);
   if (midH > 40) treeN = Math.min(treeN, 4); else if (midH < WATER + 1) treeN = 0;
   const trunkM = new THREE.InstancedMesh(GEO.trunk, MAT.trunk, treeN);
   const p1 = new THREE.InstancedMesh(GEO.pine1, MAT.pine, treeN);
@@ -396,8 +427,43 @@ function buildScatter(cx, cz, group) {
   }
   rockM.count = rc; rockM.instanceMatrix.needsUpdate = true; if (rc) group.add(rockM);
 
-  // ---- grass + flowers (thick in all forest types; sparse forest = thickest grass) ----
-  if (midH > WATER + 0.5 && midH < 36) {
+  // ---- desert scatter: cacti + sandstone boulders (replaces grass/trees) ----
+  if (isDesert) {
+    const cN = ft === 2 ? 3 : 6;
+    const cactM = new THREE.InstancedMesh(GEO.cactus, MAT.cactus, cN);
+    cactM.castShadow = cactM.receiveShadow = true;
+    let cc = 0;
+    for (let i = 0; i < cN; i++) {
+      const wx = ox + r() * CHUNK, wz = oz + r() * CHUNK;
+      const h = terrainHeight(wx, wz);
+      if (h < WATER + 0.6 || terrainSlope(wx, wz) > 0.4) continue;
+      const sc = 0.8 + r() * 1.0;
+      _q.setFromAxisAngle(_v.set(0,1,0), r() * TAU);
+      _m.compose(_v.set(wx, h, wz), _q, _s.set(sc, sc, sc));
+      cactM.setMatrixAt(cc++, _m);
+      colliders.push({ x: wx, z: wz, r: 0.5 * sc });
+    }
+    cactM.count = cc; cactM.instanceMatrix.needsUpdate = true; if (cc) group.add(cactM);
+    // sandstone boulders
+    const dN = 5;
+    const drM = new THREE.InstancedMesh(GEO.drock, MAT.drock, dN);
+    drM.castShadow = drM.receiveShadow = true;
+    let dc = 0;
+    for (let i = 0; i < dN; i++) {
+      const wx = ox + r() * CHUNK, wz = oz + r() * CHUNK;
+      const h = terrainHeight(wx, wz);
+      if (h < WATER + 0.3) continue;
+      const sc = 0.5 + r() * 1.6;
+      _q.setFromEuler(new THREE.Euler(r()*TAU, r()*TAU, r()*TAU));
+      _m.compose(_v.set(wx, h + sc*0.25, wz), _q, _s.set(sc, sc*0.7, sc));
+      drM.setMatrixAt(dc++, _m);
+      if (sc > 0.9) colliders.push({ x: wx, z: wz, r: sc * 0.7 });
+    }
+    drM.count = dc; drM.instanceMatrix.needsUpdate = true; if (dc) group.add(drM);
+  }
+
+  // ---- grass + flowers (skipped in desert; sparse forest = thickest grass) ----
+  if (!isDesert && midH > WATER + 0.5 && midH < 36) {
     const grN = ft === 2 ? 340 : ft === 1 ? 300 : 240;
     const grassM = new THREE.InstancedMesh(GEO.grass, MAT.grass, grN);
     const flN = ft === 0 ? 30 : 55;
@@ -523,8 +589,9 @@ const player = {
   stamina: 100, staMax: 100,
   gold: 0, kills: 0, xp: 0, level: 1, xpNext: 100,
   weapon: 0,
-  owned: [true, false, false, false],   // fists owned; find/buy the rest
+  owned: [true, false, false, false, false, false, false],   // fists owned; find/buy the rest
   alive: true,
+  mounted: null,     // horse entity when riding
 };
 // start at a decent grass spot
 player.pos.y = terrainHeight(0, 0) + player.height + 2;
@@ -540,7 +607,11 @@ addEventListener('keydown', e => {
     if (e.code === 'Digit2') selectWeapon(1);
     if (e.code === 'Digit3') selectWeapon(2);
     if (e.code === 'Digit4') selectWeapon(3);
+    if (e.code === 'Digit5') selectWeapon(4);
+    if (e.code === 'Digit6') selectWeapon(5);
+    if (e.code === 'Digit7') selectWeapon(6);
     if (e.code === 'KeyF') tryInteract();
+    if (e.code === 'KeyR') toggleMount();
     if (e.code === 'KeyE') tryShop();
     if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); openInventory(); }
     if (e.code === 'Escape') pauseGame();
@@ -574,8 +645,9 @@ function updatePlayer(dt) {
   const fwd = _v.set(-sinY, 0, -cosY);
   const right = new THREE.Vector3(cosY, 0, -sinY);
 
-  const sprint = keys['ShiftLeft'] && player.stamina > 1;
-  const speed = (sprint ? 11 : 6.2);
+  const mounted = player.mounted;
+  const sprint = keys['ShiftLeft'] && (mounted || player.stamina > 1);
+  const speed = mounted ? (sprint ? 24 : 15) : (sprint ? 11 : 6.2);   // horse is fast
   const wish = new THREE.Vector3();
   if (keys['KeyW']) wish.add(fwd);
   if (keys['KeyS']) wish.sub(fwd);
@@ -605,6 +677,17 @@ function updatePlayer(dt) {
   if (player.pos.y <= ground) {
     player.pos.y = ground; player.vel.y = 0; player.onGround = true;
   } else player.onGround = false;
+
+  // ride: place the horse under the player, facing travel direction
+  if (mounted && mounted.alive) {
+    const gy = terrainHeight(player.pos.x, player.pos.z);
+    mounted.mesh.position.set(player.pos.x, gy, player.pos.z);
+    mounted.mesh.rotation.y = player.yaw;
+    const spd = Math.hypot(player.vel.x, player.vel.z);
+    walkAnim(mounted, spd, dt);
+  } else if (mounted && !mounted.alive) {
+    dismount();
+  }
 
   // camera
   camera.position.copy(player.pos);
@@ -644,14 +727,42 @@ function resolveObstacles() {
     }
 }
 
+// ---- horse riding ----
+function toggleMount() {
+  if (state !== 'play') return;
+  if (player.mounted) { dismount(); return; }
+  let best = null, bd = 5;
+  for (const e of enemies) {
+    if (!e.alive || !e.rideable) continue;
+    const d = Math.hypot(e.mesh.position.x - player.pos.x, e.mesh.position.z - player.pos.z);
+    if (d < bd) { bd = d; best = e; }
+  }
+  if (best) mount(best);
+}
+function mount(e) {
+  player.mounted = e; e.state = 'ridden'; player.height = 2.7;
+  toast('🐴 امتطيت الحصان — Shift للعدو السريع، R للنزول', '');
+  sfx('loot');
+}
+function dismount() {
+  const e = player.mounted; if (!e) return;
+  player.mounted = null; e.state = 'idle'; e.wanderT = 1; player.height = 1.7;
+  player.pos.x += Math.cos(player.yaw + 1.57) * 1.6;
+  player.pos.z += Math.sin(player.yaw + 1.57) * 1.6;
+  toast('نزلت عن الحصان', '');
+}
+
 /* ----------------------------------------------------------------------------
  * 6. Weapons + viewmodel + combat
  * -------------------------------------------------------------------------- */
 const WEAPONS = [
-  { id:'fists',  name: 'قبضة', icon:'👊', dmg: 8,  range: 2.4, arc: 0.5,  cd: 0.4,  knock: 1, canFish:false, price: 0 },
-  { id:'dagger', name: 'خنجر', icon:'🗡️', dmg: 16, range: 3.2, arc: 0.55, cd: 0.28, knock: 3, canFish:false, price: 60 },
-  { id:'sword',  name: 'سيف', icon:'⚔️', dmg: 34, range: 4.2, arc: 0.62, cd: 0.5,  knock: 6, canFish:false, price: 150 },
-  { id:'spear',  name: 'رمح', icon:'🔱', dmg: 46, range: 6.4, arc: 0.42, cd: 0.72, knock: 9, canFish:true,  price: 110 },
+  { id:'fists',  name: 'قبضة',  icon:'👊', dmg: 8,  range: 2.4, arc: 0.5,  cd: 0.4,  knock: 1,  canFish:false, price: 0 },
+  { id:'dagger', name: 'خنجر',  icon:'🗡️', dmg: 16, range: 3.2, arc: 0.55, cd: 0.28, knock: 3,  canFish:false, price: 60 },
+  { id:'sword',  name: 'سيف',   icon:'⚔️', dmg: 34, range: 4.2, arc: 0.62, cd: 0.5,  knock: 6,  canFish:false, price: 150 },
+  { id:'spear',  name: 'رمح',   icon:'🔱', dmg: 46, range: 6.4, arc: 0.42, cd: 0.72, knock: 9,  canFish:true,  price: 110 },
+  { id:'axe',    name: 'فأس',   icon:'🪓', dmg: 42, range: 3.9, arc: 0.6,  cd: 0.62, knock: 8,  canFish:false, price: 140 },
+  { id:'mace',   name: 'مطرقة', icon:'🔨', dmg: 60, range: 3.5, arc: 0.55, cd: 0.9,  knock: 15, canFish:false, price: 210 },
+  { id:'bow',    name: 'قوس',   icon:'🏹', dmg: 30, range: 70,  arc: 0.0,  cd: 0.6,  knock: 4,  canFish:false, price: 180, ranged:true },
 ];
 let attackTimer = 0, swing = 0, fishing = 0;
 
@@ -683,10 +794,31 @@ function buildWeaponModel(idx) {
     const h = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.26, 8), grip);
     const g = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.04, 0.06), gold); g.position.y = 0.16;
     weaponMesh.add(blade, tip, h, g);
-  } else { // spear
+  } else if (idx === 3) { // spear
     const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.3, 8), grip); shaft.position.y = 0.45;
     const head = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.36, 4), steel); head.position.y = 1.25;
     weaponMesh.add(shaft, head);
+  } else if (idx === 4) { // axe
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.9, 8), grip); handle.position.y = 0.4;
+    const headB = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.28, 0.1), steel); headB.position.set(0, 0.82, 0);
+    const blade = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.26, 0.34, 3), steel);
+    blade.rotation.z = Math.PI/2; blade.position.set(0.17, 0.82, 0);
+    weaponMesh.add(handle, headB, blade);
+  } else if (idx === 5) { // mace / hammer
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.9, 8), grip); handle.position.y = 0.4;
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.24, 0.24),
+      new THREE.MeshStandardMaterial({ color: 0x8b8b90, metalness: 0.8, roughness: 0.4 }));
+    head.position.y = 0.9;
+    const band = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.06, 0.26), gold); band.position.y = 0.9;
+    weaponMesh.add(handle, head, band);
+  } else { // bow
+    const b = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.03, 6, 12, Math.PI*1.3),
+      new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.7 }));
+    b.rotation.z = Math.PI/2; b.position.set(0.1, 0.4, 0);
+    const string = new THREE.Mesh(new THREE.CylinderGeometry(0.005, 0.005, 0.74, 4),
+      new THREE.MeshBasicMaterial({ color: 0xdddddd }));
+    string.position.set(0.1 - 0.28, 0.4, 0);
+    weaponMesh.add(b, string);
   }
   weaponMesh.traverse(o => { if (o.isMesh) o.castShadow = false; });
   weaponMesh.scale.setScalar(0.7);       // keep viewmodel out of the way
@@ -722,6 +854,8 @@ function attack() {
   const w = WEAPONS[player.weapon];
   // fishing: spear (or any canFish tool) aimed near water
   if (w.canFish && isNearWater()) { startFishing(); return; }
+  // ranged: fire an arrow along the camera direction
+  if (w.ranged) { attackTimer = w.cd; swing = 1; shootArrow(w); sfx('swing'); return; }
   attackTimer = w.cd; swing = 1;
   // hit detection: forward arc
   const fwd = _v.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw)).normalize();
@@ -760,6 +894,49 @@ function updateWeaponAnim(dt) {
 }
 
 /* ----------------------------------------------------------------------------
+ * 6b. Projectiles (arrows from the bow)
+ * -------------------------------------------------------------------------- */
+const projectiles = [];
+const _arrowGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.8, 5);
+const _arrowMat = new THREE.MeshStandardMaterial({ color: 0x8a6b3a, metalness: 0.3, roughness: 0.6 });
+const _up = new THREE.Vector3(0, 1, 0);
+function shootArrow(w) {
+  const cp = Math.cos(player.pitch);
+  const dir = new THREE.Vector3(-Math.sin(player.yaw) * cp, Math.sin(player.pitch), -Math.cos(player.yaw) * cp).normalize();
+  const m = new THREE.Mesh(_arrowGeo, _arrowMat);
+  m.quaternion.setFromUnitVectors(_up, dir);
+  m.position.copy(player.pos).addScaledVector(dir, 0.8);
+  scene.add(m);
+  projectiles.push({ mesh: m, dir, vel: dir.clone().multiplyScalar(62), dmg: w.dmg, knock: w.knock, life: 2.6 });
+}
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.life -= dt;
+    p.vel.y -= 12 * dt;                       // gravity drop
+    p.mesh.position.addScaledVector(p.vel, dt);
+    p.mesh.quaternion.setFromUnitVectors(_up, p.vel.clone().normalize());
+    // enemy hit
+    let hit = false;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      const dx = e.mesh.position.x - p.mesh.position.x;
+      const dy = e.mesh.position.y + e.radius - p.mesh.position.y;
+      const dz = e.mesh.position.z - p.mesh.position.z;
+      if (dx*dx + dy*dy + dz*dz < (e.radius + 0.6) * (e.radius + 0.6)) {
+        _s.set(dx, 0, dz).normalize();
+        damageEnemy(e, p.dmg, _s, p.knock);
+        flashCrosshair(); sfx('hit'); hit = true; break;
+      }
+    }
+    // ground / lifetime
+    if (hit || p.life <= 0 || p.mesh.position.y < terrainHeight(p.mesh.position.x, p.mesh.position.z)) {
+      scene.remove(p.mesh); projectiles.splice(i, 1);
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------------
  * 7. Enemies + AI (deer, wolves, legendary bear)
  * -------------------------------------------------------------------------- */
 const enemies = [];
@@ -790,30 +967,49 @@ function makeQuadruped(bodyMatShared, size) {
 function spawnEnemy(type, x, z) {
   const h = terrainHeight(x, z);
   let mesh, hp, dmg, speed, radius, aggro, xp, name;
+  let flees = false, hostile = false, rideable = false;
   if (type === 'deer') {
     mesh = makeQuadruped(MAT.deer, 0.9);
-    // antlers
     const ant = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.8, 4), MAT.trunk);
     ant.position.set(1.0, 2.0, 0.2); ant.rotation.z = -0.5; mesh.add(ant);
-    hp = 40; dmg = 0; speed = 7; radius = 1.2; aggro = false; xp = 20; name='غزال';
+    hp = 40; dmg = 0; speed = 7; radius = 1.2; xp = 20; name='غزال'; flees = true;
+  } else if (type === 'rabbit') {
+    mesh = makeQuadruped(MAT.rabbit, 0.32);
+    const ear = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.22, 3, 5), MAT.rabbit);
+    ear.position.set(0.38, 0.62, 0.08); mesh.add(ear);
+    const ear2 = ear.clone(); ear2.position.z = -0.08; mesh.add(ear2);
+    hp = 14; dmg = 0; speed = 9; radius = 0.5; xp = 8; name='أرنب'; flees = true;
   } else if (type === 'wolf') {
     mesh = makeQuadruped(MAT.wolf, 0.7);
-    hp = 70; dmg = 12; speed = 6.5; radius = 1.1; aggro = true; xp = 40; name='ذئب';
+    hp = 70; dmg = 12; speed = 6.5; radius = 1.1; xp = 40; name='ذئب'; hostile = true;
+  } else if (type === 'boar') {
+    mesh = makeQuadruped(MAT.boar, 0.78);
+    const tusk = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.22, 4), MAT.rabbit);
+    tusk.position.set(1.15, 1.05, 0.16); tusk.rotation.z = 1.4; mesh.add(tusk);
+    hp = 100; dmg = 16; speed = 6.2; radius = 1.2; xp = 55; name='خنزير بري'; hostile = true;
+  } else if (type === 'horse') {
+    mesh = makeQuadruped(MAT.horse, 1.15);
+    // simple mane
+    const mane = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.5), MAT.trunk);
+    mane.position.set(1.0, 2.0, 0); mesh.add(mane);
+    hp = 220; dmg = 0; speed = 8; radius = 1.5; xp = 0; name='حصان'; rideable = true;
   } else { // bear boss
     mesh = makeQuadruped(MAT.fur, 1.8);
-    hp = 2600; dmg = 34; speed = 4.6; radius = 2.6; aggro = true; xp = 1000; name='الدب الأسطوري';
+    hp = 2600; dmg = 34; speed = 4.6; radius = 2.6; xp = 1000; name='الدب الأسطوري'; hostile = true;
   }
+  aggro = false;
   mesh.position.set(x, h, z);
   mesh.rotation.y = rand(TAU);
   scene.add(mesh);
   const e = {
     type, mesh, hp, hpMax: hp, dmg, speed, radius, aggro, xp, name,
+    flees, hostile, rideable,
     alive: true, state: 'idle', vel: new THREE.Vector3(),
     wanderT: rand(3), wanderDir: rand(TAU), hitFlash: 0, attackCd: 0,
     baseScale: mesh.scale.x,
   };
   enemies.push(e);
-  if (type === 'bear') { bear = e; showBossBar(); }
+  if (type === 'bear') { bear = e; e.aggro = true; showBossBar(); }
   return e;
 }
 
@@ -821,7 +1017,8 @@ function damageEnemy(e, dmg, dir, knock) {
   e.hp -= dmg;
   e.hitFlash = 0.12;
   e.aggro = true;
-  if (e.type !== 'bear') e.state = e.type === 'deer' ? 'flee' : 'chase';
+  if (e.type !== 'bear') e.state = e.hostile ? 'chase' : 'flee';
+  if (e === player.mounted) dismount();
   // knockback
   e.mesh.position.addScaledVector(dir, knock * 0.25);
   // BEAR SHRINKS with damage
@@ -861,13 +1058,19 @@ function updateEnemies(dt) {
     e.hitFlash = Math.max(0, e.hitFlash - dt);
     e.attackCd = Math.max(0, e.attackCd - dt);
 
+    // the horse the player is riding is driven by updatePlayer, not AI
+    if (e === player.mounted) {
+      if (e.mesh.userData.mat) e.mesh.userData.mat.emissive.setRGB(0, 0, 0);
+      continue;
+    }
+
     const dx = pxz.x - e.mesh.position.x, dz = pxz.z - e.mesh.position.z;
     const dist = Math.hypot(dx, dz);
     const dirToPlayer = _v.set(dx, 0, dz).normalize();
 
     let move = _s.set(0,0,0);
     // behaviour
-    if (e.type === 'deer') {
+    if (e.flees) {
       if (dist < 14 || e.state === 'flee') { // flee
         move.set(-dirToPlayer.x, 0, -dirToPlayer.z);
         e.speedCur = e.speed;
@@ -877,7 +1080,16 @@ function updateEnemies(dt) {
         move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
         e.speedCur = 2;
       }
-    } else { // wolf / bear
+    } else if (!e.hostile) { // calm animals (horse) — gentle wander, bolt if attacked
+      if (e.state === 'flee' && dist < 22) {
+        move.set(-dirToPlayer.x, 0, -dirToPlayer.z); e.speedCur = e.speed;
+      } else {
+        e.wanderT -= dt;
+        if (e.wanderT <= 0) { e.wanderT = rand(6,3); e.wanderDir = rand(TAU); }
+        move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
+        e.speedCur = 1.6;
+      }
+    } else { // wolf / boar / bear
       if (dist < 40 || e.aggro) {
         e.aggro = true;
         if (dist > (e.radius + 1.6)) {       // chase
@@ -932,14 +1144,23 @@ let spawnTimer = 0;
 function manageSpawns(dt) {
   spawnTimer -= dt;
   if (spawnTimer > 0) return;
-  spawnTimer = 2.5;
+  spawnTimer = 1.8;
   const alive = enemies.filter(e => e.alive && e.type !== 'bear');
-  if (alive.length < 14) {
-    const a = rand(TAU), d = rand(90, 55);
+  if (alive.length < 20) {
+    const a = rand(TAU), d = rand(95, 55);
     const x = player.pos.x + Math.cos(a) * d, z = player.pos.z + Math.sin(a) * d;
     const h = terrainHeight(x, z);
     if (h > WATER + 1 && h < 40) {
-      const t = Math.random() < 0.55 ? 'deer' : 'wolf';
+      const desert = desertFactor(x, z) > 0.5;
+      const horses = enemies.filter(e => e.alive && e.rideable).length;
+      const r = Math.random();
+      let t;
+      if (desert) t = r < 0.5 ? 'boar' : r < 0.8 ? 'rabbit' : 'wolf';           // desert wildlife
+      else if (r < 0.30) t = 'deer';
+      else if (r < 0.50) t = 'rabbit';
+      else if (r < 0.70) t = 'wolf';
+      else if (r < 0.85) t = 'boar';
+      else t = horses < 3 ? 'horse' : 'deer';                                    // keep a few horses around
       spawnEnemy(t, x, z);
     }
   }
@@ -1005,12 +1226,15 @@ const ITEMS = {
   dagger: { id:'dagger', name:'خنجر فولاذي', icon:'🗡️', type:'weapon', weaponIdx:1 },
   sword:  { id:'sword',  name:'سيف قديم',    icon:'⚔️', type:'weapon', weaponIdx:2 },
   spear:  { id:'spear',  name:'رمح صيد',     icon:'🔱', type:'weapon', weaponIdx:3 },
+  axe:    { id:'axe',    name:'فأس قتالي',   icon:'🪓', type:'weapon', weaponIdx:4 },
+  mace:   { id:'mace',   name:'مطرقة ثقيلة', icon:'🔨', type:'weapon', weaponIdx:5 },
+  bow:    { id:'bow',    name:'قوس',        icon:'🏹', type:'weapon', weaponIdx:6 },
 };
 // loot tables per source (id → weight)
 const LOOT_TABLES = {
   basic: [['meat',5],['pelt',3],['herb',2],['coin',4],['dagger',1]],
-  good:  [['pelt',4],['meat',3],['coin',5],['herb',2],['dagger',3],['spear',2],['sword',1],['gem',1]],
-  boss:  [['gem',4],['amulet',3],['coin',6],['sword',3],['spear',3],['dagger',2]],
+  good:  [['pelt',4],['meat',3],['coin',5],['herb',2],['dagger',3],['spear',2],['axe',2],['bow',2],['sword',1],['gem',1]],
+  boss:  [['gem',4],['amulet',3],['coin',6],['sword',3],['spear',2],['axe',2],['mace',2],['bow',2],['dagger',1]],
 };
 function pickFromTable(kind) {
   const table = LOOT_TABLES[kind] || LOOT_TABLES.basic;
@@ -1193,7 +1417,7 @@ function closeShop() { if (state !== 'shop') return; hide('shop'); state = 'play
 function renderShop() {
   $('shop-gold').textContent = player.gold;
   const list = $('shop-list'); list.innerHTML = '';
-  [1, 2, 3].forEach(idx => {
+  [1, 2, 3, 4, 5, 6].forEach(idx => {
     const w = WEAPONS[idx], owned = player.owned[idx];
     const row = document.createElement('div');
     row.className = 'shop-item' + (owned ? ' owned' : '');
@@ -1224,9 +1448,22 @@ $('inv-close') && ($('inv-close').onclick = closeInventory);
 $('shop-close') && ($('shop-close').onclick = closeShop);
 
 // contextual on-screen prompt (shop near village / fishing near water)
+function nearRideableHorse() {
+  if (player.mounted) return false;
+  for (const e of enemies)
+    if (e.alive && e.rideable &&
+        Math.hypot(e.mesh.position.x - player.pos.x, e.mesh.position.z - player.pos.z) < 5) return true;
+  return false;
+}
 function updatePrompt() {
   const p = $('prompt');
-  if (nearestVillage()) {
+  if (player.mounted) {
+    $('prompt-key').textContent = 'R'; $('prompt-text').textContent = 'النزول عن الحصان';
+    p.classList.remove('hidden');
+  } else if (nearRideableHorse()) {
+    $('prompt-key').textContent = 'R'; $('prompt-text').textContent = 'امتطاء الحصان';
+    p.classList.remove('hidden');
+  } else if (nearestVillage()) {
     $('prompt-key').textContent = 'E'; $('prompt-text').textContent = 'فتح المتجر';
     p.classList.remove('hidden');
   } else if (WEAPONS[player.weapon].canFish && isNearWater()) {
@@ -1238,18 +1475,20 @@ function updatePrompt() {
 /* ----------------------------------------------------------------------------
  * 9e. Weather — morning fog, wind/storm, occasional snow
  * -------------------------------------------------------------------------- */
-const weather = { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, mode:'صباح ضبابي', timer:18 };
+const weather = { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, rain:0, rainTarget:0, mode:'صباح ضبابي', timer:18 };
 function resetWeather() {
-  Object.assign(weather, { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, mode:'صباح ضبابي', timer:18 });
+  Object.assign(weather, { wind:0.2, windTarget:0.2, windDir:0.6, fog:1, fogTarget:0.05, snow:0, snowTarget:0, rain:0, rainTarget:0, mode:'صباح ضبابي', timer:18 });
 }
 function pickWeather() {
   const r = Math.random();
-  if      (r < 0.30) Object.assign(weather, { mode:'صحو',        windTarget:rand(0.35,0.15), fogTarget:0.05, snowTarget:0,   timer:rand(45,25) });
-  else if (r < 0.50) Object.assign(weather, { mode:'رياح عادية', windTarget:rand(0.55,0.4),  fogTarget:0.05, snowTarget:0,   timer:rand(35,20) });
-  else if (r < 0.66) Object.assign(weather, { mode:'رياح قوية',  windTarget:rand(0.95,0.75), fogTarget:0.10, snowTarget:0,   timer:rand(30,18) });
-  else if (r < 0.78) Object.assign(weather, { mode:'عاصفة',      windTarget:rand(1.3,1.0),   fogTarget:0.32, snowTarget:0.5, timer:rand(26,16) });
-  else if (r < 0.90) Object.assign(weather, { mode:'ثلج خفيف',   windTarget:rand(0.4,0.2),   fogTarget:0.15, snowTarget:0.4, timer:rand(34,22) });
-  else               Object.assign(weather, { mode:'صباح ضبابي', windTarget:0.2,             fogTarget:0.9,  snowTarget:0,   timer:rand(30,20) });
+  if      (r < 0.24) Object.assign(weather, { mode:'صحو',          windTarget:rand(0.35,0.15), fogTarget:0.05, snowTarget:0,   rainTarget:0,   timer:rand(45,25) });
+  else if (r < 0.40) Object.assign(weather, { mode:'رياح عادية',   windTarget:rand(0.55,0.4),  fogTarget:0.05, snowTarget:0,   rainTarget:0,   timer:rand(35,20) });
+  else if (r < 0.52) Object.assign(weather, { mode:'رياح قوية',    windTarget:rand(0.95,0.75), fogTarget:0.10, snowTarget:0,   rainTarget:0,   timer:rand(30,18) });
+  else if (r < 0.66) Object.assign(weather, { mode:'مطر',          windTarget:rand(0.5,0.3),   fogTarget:0.22, snowTarget:0,   rainTarget:0.6, timer:rand(34,20) });
+  else if (r < 0.76) Object.assign(weather, { mode:'عاصفة رعدية',  windTarget:rand(1.2,0.95),  fogTarget:0.35, snowTarget:0,   rainTarget:0.95,timer:rand(26,16) });
+  else if (r < 0.84) Object.assign(weather, { mode:'عاصفة',        windTarget:rand(1.3,1.0),   fogTarget:0.32, snowTarget:0.5, rainTarget:0,   timer:rand(26,16) });
+  else if (r < 0.94) Object.assign(weather, { mode:'ثلج خفيف',     windTarget:rand(0.4,0.2),   fogTarget:0.15, snowTarget:0.4, rainTarget:0,   timer:rand(34,22) });
+  else               Object.assign(weather, { mode:'صباح ضبابي',   windTarget:0.2,             fogTarget:0.9,  snowTarget:0,   rainTarget:0,   timer:rand(30,20) });
   weather.windDir += rand(1.2, -1.2);
 }
 function updateWeather(dt) {
@@ -1258,13 +1497,16 @@ function updateWeather(dt) {
   weather.wind = lerp(weather.wind, weather.windTarget, dt * 0.4);
   weather.fog  = lerp(weather.fog,  weather.fogTarget,  dt * 0.15);
   weather.snow = lerp(weather.snow, weather.snowTarget, dt * 0.3);
+  weather.rain = lerp(weather.rain, weather.rainTarget, dt * 0.4);
   windUniform.value.set(Math.cos(weather.windDir) * weather.wind, Math.sin(weather.windDir) * weather.wind);
   scene.fog.near = lerp(CHUNK * 2.2, 6, weather.fog);
   scene.fog.far  = lerp(CHUNK * (VIEW + 0.6), CHUNK * 1.5, weather.fog);
-  const dark = weather.mode === 'عاصفة' ? 0.55 : 1;
+  const stormy = weather.mode === 'عاصفة' || weather.mode === 'عاصفة رعدية';
+  const dark = stormy ? 0.5 : weather.rain > 0.3 ? 0.72 : 1;
   sun.intensity = lerp(sun.intensity, 2.1 * dark, dt * 2);
-  if (ambientNode) ambientNode.gain.value = 0.03 + weather.wind * 0.06;
+  if (ambientNode) ambientNode.gain.value = 0.03 + weather.wind * 0.06 + weather.rain * 0.05;
   updateSnow(dt);
+  updateRain(dt);
   $('w-mode').textContent = weather.mode;
   $('w-windv').textContent = weather.wind < 0.35 ? 'هادئ' : weather.wind < 0.6 ? 'نسيم' : weather.wind < 0.95 ? 'قوي' : 'عاصف';
 }
@@ -1294,6 +1536,44 @@ function updateSnow(dt) {
   }
   snowPoints.geometry.attributes.position.needsUpdate = true;
   snowPoints.position.set(player.pos.x, player.pos.y, player.pos.z);
+}
+
+// rain: falling line segments around the player
+const RAIN_N = 1600;
+let rainLines = null, rainPos = null;
+function initRain() {
+  rainPos = new Float32Array(RAIN_N * 2 * 3);   // 2 verts per drop
+  for (let i = 0; i < RAIN_N; i++) {
+    const x = rand(70,-70), y = rand(60,0), z = rand(70,-70);
+    rainPos[i*6] = x;     rainPos[i*6+1] = y;       rainPos[i*6+2] = z;
+    rainPos[i*6+3] = x;   rainPos[i*6+4] = y - 0.8; rainPos[i*6+5] = z;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+  const m = new THREE.LineBasicMaterial({ color: 0xafc6de, transparent: true, opacity: 0 });
+  rainLines = new THREE.LineSegments(g, m); rainLines.frustumCulled = false; scene.add(rainLines);
+}
+function updateRain(dt) {
+  if (!rainLines) return;
+  rainLines.material.opacity = weather.rain * 0.55;
+  rainLines.visible = weather.rain > 0.02;
+  if (!rainLines.visible) return;
+  const wx = windUniform.value.x * 3, wz = windUniform.value.y * 3;
+  const fall = (26 + weather.wind * 10) * dt;
+  for (let i = 0; i < RAIN_N; i++) {
+    for (const o of [0, 3]) {
+      rainPos[i*6 + o]     += wx * dt;
+      rainPos[i*6 + o + 1] -= fall;
+      rainPos[i*6 + o + 2] += wz * dt;
+    }
+    if (rainPos[i*6+1] < -6) {
+      const x = rand(70,-70), y = rand(60,40), z = rand(70,-70);
+      rainPos[i*6] = x;   rainPos[i*6+1] = y;       rainPos[i*6+2] = z;
+      rainPos[i*6+3] = x; rainPos[i*6+4] = y - 0.8; rainPos[i*6+5] = z;
+    }
+  }
+  rainLines.geometry.attributes.position.needsUpdate = true;
+  rainLines.position.set(player.pos.x, player.pos.y, player.pos.z);
 }
 
 /* ----------------------------------------------------------------------------
@@ -1376,6 +1656,7 @@ function drawMinimap() {
       if (h < WATER) col = '#2b6b8a';
       else if (h > 46) col = '#e8eef5';
       else if (h > 34) col = '#5b564d';
+      else if (desertFactor(wx, wz) > 0.5) col = '#cda964';
       else col = h < WATER+1 ? '#b9a86e' : `rgb(${28+h},${70+h},${24})`;
       mmx.fillStyle = col;
       mmx.fillRect(gx*MM_SCALE - step*MM_SCALE/2, gz*MM_SCALE - step*MM_SCALE/2, step*MM_SCALE+1, step*MM_SCALE+1);
@@ -1562,7 +1843,7 @@ function startGame(){
   };
   // reset player
   Object.assign(player, { hp:100, hpMax:100, stamina:100, gold:0, kills:0, xp:0, level:1, xpNext:100, alive:true });
-  player.owned = [true, false, false, false];
+  player.owned = [true, false, false, false, false, false, false];
   player.weapon = 0;
   inventory.length = 0;
   player.pos.set(0, terrainHeight(0,0)+player.height+2, 0);
@@ -1592,10 +1873,12 @@ function respawn(){
   state='play'; show('hud'); updateHUD(); canvas.requestPointerLock();
 }
 function clearEntities(){
+  player.mounted = null; player.height = 1.7;
   enemies.forEach(e => scene.remove(e.mesh)); enemies.length = 0;
   loot.forEach(l => scene.remove(l.mesh)); loot.length = 0;
   fish.forEach(f => scene.remove(f.mesh)); fish.length = 0;
   particles.forEach(p => scene.remove(p.mesh)); particles.length = 0;
+  projectiles.forEach(p => scene.remove(p.mesh)); projectiles.length = 0;
   bear = null; hideBossBar();
 }
 
@@ -1622,6 +1905,7 @@ function maybeSpawnBear(dt){
  * -------------------------------------------------------------------------- */
 buildWeaponModel(0);   // start empty-handed (fists)
 initSnow();
+initRain();
 const clock = new THREE.Clock();
 
 function animate(){
@@ -1652,6 +1936,7 @@ function animate(){
     updateFish(dt);
     updateLoot(dt);
     updateParticles(dt);
+    updateProjectiles(dt);
     // vignette fade
     if (vigT > 0){ vigT -= dt; if (vigT <= 0) $('vignette').classList.remove('show'); }
     // village shop prompt
@@ -1685,12 +1970,16 @@ updateChunks(0, 0);
 // optional debug bridge (append #debug to the URL): quick testing helpers
 if (location.hash.includes('debug')) {
   window.__DBG = {
-    player, inventory, WEAPONS, villages, weather,
+    player, inventory, WEAPONS, villages, weather, enemies,
     gold: (n = 500) => { player.gold += n; updateHUD(); },
     give: (id) => { const d = ITEMS[id]; if (d.type === 'weapon') unlockWeapon(d.weaponIdx); addItem(id, 1, 'rare'); },
     drop: (kind = 'good') => dropLoot(player.pos, kind),
     villageHere: () => villages.push({ x: player.pos.x + 3, z: player.pos.z }),
     setWeather: (m) => { weather.timer = 999; Object.assign(weather, m); },
+    spawn: (type = 'horse') => spawnEnemy(type, player.pos.x + 3, player.pos.z + 1),
+    mount: () => toggleMount(),
+    tp: (x, z) => { player.pos.set(x, terrainHeight(x, z) + player.height + 2, z); updateChunks(x, z); },
+    findDesert: () => { for (let d = 200; d < 6000; d += 120) for (let a = 0; a < 6.28; a += 0.5) { const x = Math.cos(a)*d, z = Math.sin(a)*d; if (desertFactor(x, z) > 0.6) return { x: Math.round(x), z: Math.round(z) }; } return null; },
     openShop, openInventory,
   };
 }
