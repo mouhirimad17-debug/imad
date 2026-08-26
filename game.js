@@ -21,6 +21,8 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 /* ----------------------------------------------------------------------------
  * 0. Utilities
@@ -365,6 +367,64 @@ applyWind(MAT.pine, 0.012);
 applyWind(MAT.pineHi, 0.012);
 
 /* ----------------------------------------------------------------------------
+ * 3b. GLB model manager (houses, plants, animals)
+ * -------------------------------------------------------------------------- */
+const gltfLoader = new GLTFLoader();
+const MODELS = {};   // key -> { proto, anims, skinned }
+// normalize each model: `span` fits the horizontal footprint, `height` fits Y
+const MODEL_CONF = {
+  hen:      { span: 0.8 },
+  fox:      { span: 1.5, anim: true },
+  longhorn: { span: 2.4 },
+  house1:{ span: 6 }, house2:{ span: 6 }, house3:{ span: 5.2 }, house4:{ span: 5.2 }, house5:{ span: 6.5 }, house6:{ span: 6 },
+  plants1:{ height: 1.6 }, plants2:{ height: 1.1 }, plants4:{ height: 1.0 },
+  tomato:{ height: 1.4 }, waterplant:{ height: 0.6 }, monstera:{ height: 1.1 },
+};
+const HOUSE_KEYS = ['house1','house2','house3','house4','house5','house6'];
+const PLANT_KEYS = ['plants1','plants2','plants4','tomato','monstera'];
+const _box = new THREE.Box3(), _sz = new THREE.Vector3(), _ctr = new THREE.Vector3();
+function prepModel(key, gltf) {
+  const conf = MODEL_CONF[key] || { span: 2 };
+  const root = gltf.scene;
+  _box.setFromObject(root); _box.getSize(_sz);
+  const s = conf.height ? conf.height / Math.max(1e-3, _sz.y)
+                        : conf.span / Math.max(1e-3, _sz.x, _sz.z);
+  root.scale.setScalar(s);
+  root.updateMatrixWorld(true);
+  _box.setFromObject(root); _box.getCenter(_ctr);
+  root.position.x -= _ctr.x; root.position.z -= _ctr.z; root.position.y -= _box.min.y;
+  let skinned = false;
+  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } if (o.isSkinnedMesh) skinned = true; });
+  const wrap = new THREE.Group(); wrap.add(root);
+  MODELS[key] = { proto: wrap, anims: gltf.animations || [], skinned };
+}
+function loadModel(key) {
+  return new Promise(res => {
+    gltfLoader.load('./assets/models/' + key + '.glb',
+      g => { try { prepModel(key, g); } catch (e) { console.warn('prep', key, e); } res(); },
+      undefined, e => { console.warn('load fail', key, e); res(); });
+  });
+}
+let modelsReady = null;
+function loadAllModels() {
+  if (modelsReady) return modelsReady;
+  const keys = ['hen','fox','longhorn', ...HOUSE_KEYS, ...PLANT_KEYS];
+  modelsReady = Promise.all(keys.map(loadModel));
+  return modelsReady;
+}
+// make a fresh instance of a model; returns null if not loaded
+function instModel(key) {
+  const m = MODELS[key]; if (!m) return null;
+  const obj = m.skinned ? skeletonClone(m.proto) : m.proto.clone();
+  if (m.anims.length) {
+    const mixer = new THREE.AnimationMixer(obj);
+    mixer.clipAction(m.anims[0]).play();
+    obj.userData.mixer = mixer;
+  }
+  return obj;
+}
+
+/* ----------------------------------------------------------------------------
  * 4. Chunk manager — terrain + scatter
  * -------------------------------------------------------------------------- */
 const chunkGroup = new THREE.Group();
@@ -539,6 +599,17 @@ function buildScatter(cx, cz, group) {
     flM.count = fc; flM.instanceMatrix.needsUpdate = true;
     if (flM.instanceColor) flM.instanceColor.needsUpdate = true;
     if (fc) group.add(flM);
+    // GLB plant clumps scattered among the grass
+    const pN = ft === 0 ? 5 : 3;
+    for (let i = 0; i < pN; i++) {
+      const wx = ox + r() * CHUNK, wz = oz + r() * CHUNK;
+      const h = terrainHeight(wx, wz);
+      if (h < WATER + 0.5 || h > 33 || terrainSlope(wx, wz) > 0.45) continue;
+      const p = instModel(PLANT_KEYS[Math.floor(r() * PLANT_KEYS.length)]);
+      if (!p) break;
+      p.position.set(wx, h, wz); p.rotation.y = r() * TAU; p.scale.multiplyScalar(0.7 + r() * 0.7);
+      group.add(p);
+    }
   }
 
   // ---- water plane if chunk dips below water ----
@@ -610,7 +681,7 @@ const SHOP_TYPES = [
 function buildVillage(cx, cz, group, colliders) {
   const r = rng((cx | 0) * 40503 ^ (cz | 0) * 1299721);
   const key = group.userData.key;
-  const COLS = 8, ROWS = 8, CELL = 6.6;                 // 8×8 grid → up to ~60 plots
+  const COLS = 8, ROWS = 8, CELL = 8;                   // 8×8 grid with wide alleys → ~50 houses
   const half = (COLS - 1) * CELL / 2;
   const plaza = { c0: 3, c1: 4, r0: 3, r1: 4 };          // central 2×2 = plaza
   let shopBudget = 6;
@@ -627,20 +698,18 @@ function buildVillage(cx, cz, group, colliders) {
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
       const makeShop = shopBudget > 0 && edge && r() < 0.28;
       const w = 3.6 + r() * 1.6, d = 3.6 + r() * 1.6, wallH = 2.8 + r() * 1.2;
-      const house = makeHouse(r, w, d, wallH, wallMats[(ci + ri) & 1]);
-      // face the nearest street (toward plaza centre)
+      // prefer a GLB house model; fall back to the procedural box house
+      const glb = instModel(HOUSE_KEYS[Math.floor(r() * HOUSE_KEYS.length)]);
+      const house = glb || makeHouse(r, w, d, wallH, wallMats[(ci + ri) & 1]);
       house.rotation.y = Math.atan2(cx - x, cz - z) + (r() < 0.5 ? 0 : Math.PI);
       house.position.set(x, h, z);
       group.add(house);
-      colliders.push({ x, z, r: Math.max(w, d) * 0.6 });
+      const cr = glb ? 2.7 : Math.max(w, d) * 0.6;
+      colliders.push({ x, z, r: cr });
       if (makeShop) {
         shopBudget--;
         const st = SHOP_TYPES[shopBudget % SHOP_TYPES.length];
-        // awning over the door
-        const awn = new THREE.Mesh(GEO.unitBox, new THREE.MeshLambertMaterial({ color: st.awn }));
-        awn.scale.set(w * 0.9, 0.12, 1.2); awn.position.set(0, wallH * 0.72, d / 2 + 0.6); awn.rotation.x = 0.2;
-        house.add(awn);
-        const sign = makeSign(st.sign); sign.position.set(0, wallH + 1.4, d / 2 + 0.3);
+        const sign = makeSign(st.sign); sign.position.set(0, (glb ? 4.2 : wallH + 1.4), 0);
         house.add(sign);
         shops.push({ x, z, type: st.type, name: st.name, key });
       }
@@ -769,6 +838,7 @@ const player = {
   gold: 0, kills: 0, xp: 0, level: 1, xpNext: 100,
   weapon: 0,
   owned: [true, false, false, false, false, false, false],   // fists owned; find/buy the rest
+  wLevel: [0,0,0,0,0,0,0],   // per-weapon upgrade level (blacksmith)
   alive: true,
   mounted: null,     // horse entity when riding
 };
@@ -1085,6 +1155,7 @@ function unlockWeapon(i) {
   return true;
 }
 
+function wMul() { return 1 + (player.wLevel[player.weapon] || 0) * 0.25; }   // +25% dmg per upgrade
 function attack() {
   if (attackTimer > 0 || !player.alive || fishing > 0) return;
   const w = WEAPONS[player.weapon];
@@ -1103,7 +1174,7 @@ function attack() {
     if (d > w.range + e.radius) continue;
     to.normalize();
     if (fwd.dot(to) < 1 - w.arc) continue;
-    damageEnemy(e, w.dmg, to, w.knock);
+    damageEnemy(e, w.dmg * wMul(), to, w.knock);
     hitAny = true;
   }
   if (hitAny) { flashCrosshair(); sfx('hit'); } else sfx('swing');
@@ -1143,7 +1214,7 @@ function shootArrow(w) {
   m.quaternion.setFromUnitVectors(_up, dir);
   m.position.copy(player.pos).addScaledVector(dir, 0.8);
   scene.add(m);
-  projectiles.push({ mesh: m, dir, vel: dir.clone().multiplyScalar(62), dmg: w.dmg, knock: w.knock, life: 2.6 });
+  projectiles.push({ mesh: m, dir, vel: dir.clone().multiplyScalar(62), dmg: w.dmg * wMul(), knock: w.knock, life: 2.6 });
 }
 function updateProjectiles(dt) {
   for (let i = projectiles.length - 1; i >= 0; i--) {
@@ -1254,10 +1325,17 @@ function spawnEnemy(type, x, z) {
     hump.position.set(0, 3.1, 0); hump.scale.y = 0.7; mesh.add(hump);
     hp = 260; dmg = 0; speed = 7.5; radius = 1.6; xp = 0; name='جمل'; rideable = true;
   } else if (type === 'chicken') {
-    mesh = makeQuadruped(MAT.chicken, 0.28);
-    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.14, 4), MAT.drock);
-    beak.position.set(0.42, 0.5, 0); beak.rotation.z = -1.57; mesh.add(beak);
+    mesh = instModel('hen');
+    if (!mesh) { mesh = makeQuadruped(MAT.chicken, 0.28);
+      const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.14, 4), MAT.drock);
+      beak.position.set(0.42, 0.5, 0); beak.rotation.z = -1.57; mesh.add(beak); }
     hp = 10; dmg = 0; speed = 5; radius = 0.45; xp = 6; name='دجاجة'; flees = true;
+  } else if (type === 'fox') {
+    mesh = instModel('fox') || makeQuadruped(MAT.deer, 0.55);
+    hp = 46; dmg = 9; speed = 8.2; radius = 0.7; xp = 30; name='ثعلب'; hostile = true;
+  } else if (type === 'cow') {
+    mesh = instModel('longhorn') || makeQuadruped(MAT.deer, 1.1);
+    hp = 200; dmg = 0; speed = 3.2; radius = 1.4; xp = 15; name='بقرة';   // calm
   } else if (type === 'cat') {
     mesh = makeQuadruped(MAT.cat, 0.4);
     const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.6, 4), MAT.cat);
@@ -1319,6 +1397,7 @@ function damageEnemy(e, dmg, dir, knock) {
 function killEnemy(e, dir) {
   e.alive = false;
   player.kills++;
+  onKillForQuest(e.type);
   gainXP(e.xp);
   toast(`قتلت ${e.name}`, e.type === 'bear' ? 'legendary' : '');
   // drop loot
@@ -1341,6 +1420,7 @@ function updateEnemies(dt) {
     }
     e.hitFlash = Math.max(0, e.hitFlash - dt);
     e.attackCd = Math.max(0, e.attackCd - dt);
+    if (e.mesh.userData.mixer) e.mesh.userData.mixer.update(dt);   // GLB animation
 
     // the horse the player is riding is driven by updatePlayer, not AI
     if (e === player.mounted) {
@@ -1459,14 +1539,16 @@ function manageSpawns(dt) {
         else if (r < 0.82) t = 'wolf';
         else t = mounts < 2 ? 'camel' : 'boar';                                  // camels to ride
       } else {                                                                   // forest wildlife
-        if (r < 0.18) t = 'deer';
-        else if (r < 0.32) t = 'rabbit';
-        else if (r < 0.44) t = 'chicken';
-        else if (r < 0.52) t = 'cat';
-        else if (r < 0.60) t = 'dog';
-        else if (r < 0.70) t = 'snake';
-        else if (r < 0.82) t = 'wolf';
-        else if (r < 0.92) t = 'boar';
+        if (r < 0.15) t = 'deer';
+        else if (r < 0.27) t = 'rabbit';
+        else if (r < 0.38) t = 'chicken';
+        else if (r < 0.46) t = 'fox';
+        else if (r < 0.52) t = 'cow';
+        else if (r < 0.59) t = 'cat';
+        else if (r < 0.66) t = 'dog';
+        else if (r < 0.73) t = 'snake';
+        else if (r < 0.84) t = 'wolf';
+        else if (r < 0.93) t = 'boar';
         else t = mounts < 3 ? 'horse' : 'deer';                                  // keep horses around
       }
       spawnEnemy(t, x, z);
@@ -1561,6 +1643,7 @@ function addItem(itemId, qty = 1, rarity = 'common') {
   let stack = inventory.find(s => s.id === itemId);
   if (stack) stack.qty += qty;
   else inventory.push({ ...def, rarity, qty });
+  if (quest && quest.kind === 'gather') renderQuestHUD();
 }
 
 function rollRarity(kind) {
@@ -1753,8 +1836,18 @@ const SHOP_GOODS = {
     { id:'torch', icon:'🔦', name:'مشعل', desc:'إضاءة', price:18, add:'torch' },
     { id:'rope',  icon:'🪢', name:'حبل', desc:'أداة', price:14, add:'rope' },
     { id:'potion',icon:'🧪', name:'جرعة شفاء', desc:'+50 صحة', price:40, act:()=>{ player.hp=clamp(player.hp+50,0,player.hpMax); } },
+    { id:'horse', icon:'🐴', name:'حصان', desc:'مركبة سريعة', price:220, mount:'horse' },
+    { id:'camel', icon:'🐫', name:'جمل', desc:'مركبة صحراوية', price:260, mount:'camel' },
   ],
 };
+// blacksmith upgrade entry for the currently equipped weapon
+function upgradeGood() {
+  const wi = player.weapon; if (wi === 0) return null;
+  const lvl = player.wLevel[wi] || 0;
+  const w = WEAPONS[wi];
+  return { id:'upgrade', icon:'⬆️', name:`تطوير ${w.name} → مستوى ${lvl+1}`,
+    desc:`+25% ضرر · يتطلب فراءً واحداً`, price: 80 + lvl * 70, upgrade: true };
+}
 // extend item registry with shop foods/materials
 Object.assign(ITEMS, {
   bread:  { id:'bread', name:'خبز', icon:'🍞', type:'food', heal:22 },
@@ -1784,7 +1877,9 @@ function renderShop() {
   const t = currentShop ? currentShop.type : 'weapon';
   document.querySelector('#shop .inv-head h2').textContent = '🏪 متجر ' + (currentShop ? currentShop.name : '');
   const list = $('shop-list'); list.innerHTML = '';
-  for (const g of SHOP_GOODS[t]()) {
+  const goods = SHOP_GOODS[t]().slice();
+  if (currentShop && currentShop.name === 'الحدّاد') { const u = upgradeGood(); if (u) goods.unshift(u); }
+  for (const g of goods) {
     const row = document.createElement('div');
     if (g.w !== undefined) {   // weapon entry
       const w = WEAPONS[g.w], owned = player.owned[g.w];
@@ -1813,7 +1908,15 @@ function buyWeapon(idx) {
 }
 function buyGood(g) {
   if (player.gold < g.price) return;
+  if (g.upgrade) {
+    if (countItem('pelt') < 1) { toast('تحتاج فراءً واحداً للتطوير', ''); return; }
+    const s = inventory.find(x => x.id === 'pelt'); s.qty--; if (s.qty <= 0) inventory.splice(inventory.indexOf(s), 1);
+    player.gold -= g.price; player.wLevel[player.weapon]++;
+    toast(`⬆️ طوّرت ${WEAPONS[player.weapon].name} إلى مستوى ${player.wLevel[player.weapon]}!`, 'epic');
+    sfx('loot'); updateWeaponBadge(); updateHUD(); renderShop(); return;
+  }
   player.gold -= g.price;
+  if (g.mount) { const e = spawnEnemy(g.mount, player.pos.x + 3, player.pos.z + 1); toast(`اشتريت ${g.name}! اضغط R لركوبه`, 'epic'); }
   if (g.add) addItem(g.add, g.qty || 1, 'common');
   if (g.armor) { player.hpMax += g.armor; player.hp += g.armor; }
   if (g.stam) player.staMax += g.stam;
@@ -1853,6 +1956,11 @@ function renderTalk(line) {
   $('dlg-name').textContent = talkNPC ? talkNPC.name : '';
   $('dlg-text').textContent = line;
   const opts = $('dlg-options'); opts.innerHTML = '';
+  // quest option (highlighted)
+  const qb = document.createElement('button'); qb.className = 'dlg-opt dlg-quest';
+  qb.textContent = !quest ? '📜 هل من مهمة؟' : questComplete() ? '✅ لقد أنجزت المهمة!' : '📜 عن مهمتي';
+  qb.onclick = () => { questDialogue(); if (talkNPC) voiceBlip(talkNPC); };
+  opts.appendChild(qb);
   for (const qa of TALK_QA) {
     const b = document.createElement('button'); b.className = 'dlg-opt'; b.textContent = qa.q;
     b.onclick = () => { renderTalk(qa.a); if (talkNPC) voiceBlip(talkNPC); };
@@ -1863,6 +1971,48 @@ function renderTalk(line) {
 }
 function closeTalk() { if (state !== 'talk') return; hide('dialogue'); talkNPC = null; state = 'play'; canvas.requestPointerLock(); }
 $('dlg-close') && ($('dlg-close').onclick = closeTalk);
+
+/* ----------------------------------------------------------------------------
+ * 9d-3. Quests (from townsfolk)
+ * -------------------------------------------------------------------------- */
+let quest = null;
+const QUEST_DEFS = [
+  { kind:'kill', species:'wolf',  label:t=>`اصطد ${t} ذئاب`,         need:()=>3+randi(0,2), gold:130 },
+  { kind:'kill', species:'fox',   label:t=>`اصطد ${t} ثعالب`,        need:()=>3,            gold:110 },
+  { kind:'kill', species:'boar',  label:t=>`اصطد ${t} خنازير برية`,  need:()=>3,            gold:150 },
+  { kind:'gather', item:'stick',  label:t=>`اجمع ${t} أعواد للقرية`, need:()=>5+randi(0,3), gold:70 },
+  { kind:'gather', item:'pelt',   label:t=>`اجمع ${t} فراء`,         need:()=>4,            gold:100 },
+  { kind:'gather', item:'meatC',  label:t=>`اطبخ وأحضر ${t} لحم مطبوخ`, need:()=>3,         gold:120 },
+];
+function countItem(id) { const s = inventory.find(x => x.id === id); return s ? s.qty : 0; }
+function questProgress() { if (!quest) return 0; return quest.kind === 'gather' ? Math.min(countItem(quest.item), quest.need) : quest.count; }
+function questComplete() { return !!quest && questProgress() >= quest.need; }
+function renderQuestHUD() {
+  const el = $('quest'); if (!el) return;
+  if (!quest) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  $('quest-text').textContent = `${quest.label} (${questProgress()}/${quest.need})` + (questComplete() ? ' ✓ عُد إلى أهل القرية' : '');
+}
+function giveQuest() {
+  const d = QUEST_DEFS[Math.floor(rand(QUEST_DEFS.length))];
+  const need = d.need();
+  quest = { kind: d.kind, species: d.species, item: d.item, need, count: 0, gold: d.gold, label: d.label(need) };
+  renderQuestHUD();
+  return quest;
+}
+function onKillForQuest(type) {
+  if (quest && quest.kind === 'kill' && quest.species === type) { quest.count++; renderQuestHUD(); }
+}
+function questDialogue() {
+  if (!talkNPC) return;
+  if (!quest) { const q = giveQuest(); renderTalk(`لديّ عمل لك: ${q.label}. أنجزه وستُكافأ بـ ${q.gold} ذهباً!`); }
+  else if (questComplete()) {
+    player.gold += quest.gold;
+    if (quest.kind === 'gather') { const s = inventory.find(x => x.id === quest.item); if (s) { s.qty -= quest.need; if (s.qty <= 0) inventory.splice(inventory.indexOf(s), 1); } }
+    renderTalk(`أحسنت! خذ مكافأتك: ${quest.gold} ذهباً. بارك الله فيك.`);
+    quest = null; renderQuestHUD(); updateHUD(); sfx('loot');
+  } else renderTalk(`مهمتك بعد: ${quest.label} (${questProgress()}/${quest.need}). لا تتأخر!`);
+}
 
 // contextual on-screen prompt (shop near village / fishing near water)
 function nearRideableHorse() {
@@ -2136,24 +2286,36 @@ const NPC_LINES = [
   'اشترِ حصاناً، يسهّل التنقل كثيراً.',
   'الغابة تخفي أسراراً كثيرة.',
 ];
+// two base "characters" (male/female-ish silhouettes), each cloned with varied clothes
 function makeNPC(rr = Math.random) {
   const g = new THREE.Group();
-  const mat = MAT.npc.clone();
-  mat.color.setHSL(rr(), 0.32, 0.4 + rr() * 0.25);
-  // robe (torso), skin head, arms, headwear
-  const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.4, 1.35, 9), mat);
-  robe.position.y = 0.68; robe.castShadow = true;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 10), MAT.skin);
-  head.position.y = 1.55; head.castShadow = true;
-  const armGeo = new THREE.CapsuleGeometry(0.08, 0.5, 3, 6);
-  const la = new THREE.Mesh(armGeo, mat); la.position.set(0.34, 0.85, 0); la.rotation.z = 0.2;
-  const ra = new THREE.Mesh(armGeo, mat); ra.position.set(-0.34, 0.85, 0); ra.rotation.z = -0.2;
-  // turban / headscarf
-  const capMat = MAT.npc.clone(); capMat.color.setHSL(rr(), 0.4, 0.45);
-  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 7, 0, TAU, 0, 1.3), capMat);
-  cap.position.y = 1.64;
-  g.add(robe, head, la, ra, cap);
-  g.userData.arms = [la, ra];
+  const kind = rr() < 0.5 ? 0 : 1;                          // two body types
+  const robeMat = MAT.npc.clone(); robeMat.color.setHSL(rr(), 0.4, 0.38 + rr() * 0.24);
+  const skin = MAT.skin.clone(); skin.color.setHSL(0.07, 0.4, 0.55 + rr() * 0.2);
+  const topR = kind ? 0.24 : 0.3, botR = kind ? 0.42 : 0.38, bodyH = kind ? 1.4 : 1.3;
+  const robe = new THREE.Mesh(new THREE.CylinderGeometry(topR, botR, bodyH, 9), robeMat);
+  robe.position.y = bodyH / 2 + 0.05; robe.castShadow = true;
+  // optional sash / belt
+  if (rr() < 0.6) { const sashMat = MAT.npc.clone(); sashMat.color.setHSL(rr(), 0.6, 0.5);
+    const sash = new THREE.Mesh(GEO.unitBox, sashMat); sash.scale.set(topR*2.1, 0.14, botR*2.1); sash.position.y = bodyH*0.6; g.add(sash); }
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 10, 10), skin);
+  head.position.y = bodyH + 0.28; head.castShadow = true;
+  const armGeo = new THREE.CapsuleGeometry(0.075, 0.5, 3, 6);
+  const la = new THREE.Mesh(armGeo, robeMat); la.position.set(topR + 0.06, bodyH * 0.62, 0);
+  const ra = new THREE.Mesh(armGeo, robeMat); ra.position.set(-(topR + 0.06), bodyH * 0.62, 0);
+  const legGeo = new THREE.CapsuleGeometry(0.09, 0.45, 3, 6);
+  const ll = new THREE.Mesh(legGeo, robeMat); ll.position.set(0.13, 0.28, 0);
+  const rl = new THREE.Mesh(legGeo, robeMat); rl.position.set(-0.13, 0.28, 0);
+  g.add(robe, head, la, ra, ll, rl);
+  // headwear variety: turban / cap / bare, + optional beard
+  const hw = rr();
+  if (hw < 0.45) { const c = MAT.npc.clone(); c.color.setHSL(rr(), 0.45, 0.5);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 7, 0, TAU, 0, 1.3), c); cap.position.y = bodyH + 0.34; g.add(cap); }
+  else if (hw < 0.75) { const c = MAT.npc.clone(); c.color.setHSL(rr(), 0.5, 0.4);
+    const fez = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.19, 0.22, 8), c); fez.position.y = bodyH + 0.44; g.add(fez); }
+  if (kind === 0 && rr() < 0.5) { const beard = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.24, 7),
+    new THREE.MeshLambertMaterial({ color: 0x2a2018 })); beard.position.set(0, bodyH + 0.12, 0.16); beard.rotation.x = 0.5; g.add(beard); }
+  g.userData.arms = [la, ra]; g.userData.legs = [ll, rl]; g.userData.rightArm = ra;
   return g;
 }
 function spawnTownNPCs(cx, cz, group, key, r) {
@@ -2190,16 +2352,38 @@ const _np = new THREE.Vector3();
 function updateNPCs(dt) {
   camera.updateMatrixWorld();
   for (const npc of npcs) {
-    // gentle wander near home
+    // NPCs far from the player pause (perf) but still hold their pose
+    const far = Math.hypot(npc.mesh.position.x - player.pos.x, npc.mesh.position.z - player.pos.z);
+    if (far > 90) { if (npc.bubble) { npc.bubble.style.display = 'none'; } continue; }
+    // gentle wander near home; pause while talking to the player or a neighbour
+    const talking = elapsed < npc.sayUntil;
     npc.wanderT -= dt;
-    if (npc.wanderT <= 0) { npc.wanderT = rand(5, 2); npc.wanderDir = rand(TAU); }
-    const nx = npc.mesh.position.x + Math.cos(npc.wanderDir) * 0.6 * dt;
-    const nz = npc.mesh.position.z + Math.sin(npc.wanderDir) * 0.6 * dt;
-    if (Math.hypot(nx - npc.homeX, nz - npc.homeZ) < 7) {
-      npc.mesh.position.x = nx; npc.mesh.position.z = nz;
-      npc.mesh.rotation.y = Math.atan2(Math.cos(npc.wanderDir), Math.sin(npc.wanderDir));
+    if (npc.wanderT <= 0) { npc.wanderT = rand(5, 2); npc.wanderDir = rand(TAU); npc.pause = rand() < 0.4; }
+    let moving = false;
+    if (!talking && !npc.pause && npc !== talkNPC) {
+      const nx = npc.mesh.position.x + Math.cos(npc.wanderDir) * 0.7 * dt;
+      const nz = npc.mesh.position.z + Math.sin(npc.wanderDir) * 0.7 * dt;
+      if (Math.hypot(nx - npc.homeX, nz - npc.homeZ) < 9) {
+        npc.mesh.position.x = nx; npc.mesh.position.z = nz;
+        npc.mesh.rotation.y = Math.atan2(Math.cos(npc.wanderDir), Math.sin(npc.wanderDir));
+        moving = true;
+      }
     }
     npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z);
+    // character animation: walk / idle / talk gesture
+    npc.walkT = (npc.walkT || 0) + dt * (moving ? 8 : 2);
+    const legs = npc.mesh.userData.legs, arms = npc.mesh.userData.arms;
+    if (legs) {
+      const s = moving ? Math.sin(npc.walkT) * 0.5 : 0;
+      legs[0].rotation.x = s; legs[1].rotation.x = -s;
+      if (arms) { arms[0].rotation.x = -s * 0.8; arms[1].rotation.x = s * 0.8; }
+    }
+    if (talking && npc.mesh.userData.rightArm) {   // gesture while speaking
+      npc.mesh.userData.rightArm.rotation.x = -0.6 + Math.sin(elapsed * 8) * 0.4;
+    } else if (arms && !moving) {
+      arms[0].rotation.x = Math.sin(npc.walkT * 0.5) * 0.05;
+      arms[1].rotation.x = -Math.sin(npc.walkT * 0.5) * 0.05;
+    }
 
     // conversation: speak on a timer, prompt a nearby neighbour to reply
     npc.talkT -= dt;
@@ -2536,24 +2720,24 @@ function backToMenu(){
   document.exitPointerLock?.();
 }
 
+function clearChunks(){
+  npcs.forEach(n => { if (n.bubble) n.bubble.remove(); });
+  npcs.length = 0; shops.length = 0; villages.length = 0;
+  chunks.forEach(c => chunkGroup.remove(c));
+  chunks.clear();
+}
 function startGame(){
   initAudio();
   hide('menu'); show('loading');
-  // progressive world warm-up
-  let step = 0;
-  const total = 8;
-  const warm = () => {
-    step++;
-    $('loader-fill').style.width = (step/total*100)+'%';
-    updateChunks(player.pos.x, player.pos.z);
-    if (step < total) { setTimeout(warm, 60); return; }
-    finishLoad();
-  };
+  $('loader-fill').style.width = '5%';
+  document.querySelector('#loading .loader-text').textContent = 'تُحمَّل النماذج والغابة…';
   // reset player
   Object.assign(player, { hp:100, hpMax:100, stamina:100, gold:0, kills:0, xp:0, level:1, xpNext:100, alive:true });
   player.owned = [true, false, false, false, false, false, false];
   player.weapon = 0;
+  player.wLevel = [0,0,0,0,0,0,0];
   inventory.length = 0;
+  quest = null; renderQuestHUD();
   player.pos.set(0, terrainHeight(0,0)+player.height+2, 0);
   player.vel.set(0,0,0); player.yaw=0; player.pitch=0;
   clearEntities();
@@ -2561,7 +2745,19 @@ function startGame(){
   selectWeapon(0);
   refreshWeaponWheel();
   updateHUD();
-  warm();
+  // load GLB models first, then (re)build the world so chunks use them
+  loadAllModels().then(() => {
+    clearChunks();
+    let step = 0; const total = 8;
+    const warm = () => {
+      step++;
+      $('loader-fill').style.width = (30 + step / total * 70) + '%';
+      updateChunks(player.pos.x, player.pos.z);
+      if (step < total) { setTimeout(warm, 60); return; }
+      finishLoad();
+    };
+    warm();
+  });
 }
 function finishLoad(){
   hide('loading'); show('hud'); state='play';
@@ -2759,8 +2955,7 @@ addEventListener('resize', () => {
   bgRenderer.setSize(innerWidth, innerHeight);
 });
 
-// warm the very first chunks so menu bg has data & play start is instant-ish
-updateChunks(0, 0);
+// (world chunks are built in startGame after GLB models finish loading)
 
 // optional debug bridge (append #debug to the URL): quick testing helpers
 if (location.hash.includes('debug')) {
@@ -2784,6 +2979,8 @@ if (location.hash.includes('debug')) {
     give3: () => { [1,2,3].forEach(i=>unlockWeapon(i)); },
     sticks: () => addItem('stick', 6),
     lightFire, cook: cookOrLight,
+    MODELS, modelKeys: () => Object.keys(MODELS),
+    giveQuest, quest: () => quest, questProgress, upgradeGood,
     openInventory,
   };
   function isDesert2(cx,cz){ return desertFactor(cx*CHUNK+CHUNK/2, cz*CHUNK+CHUNK/2) > 0.5; }
