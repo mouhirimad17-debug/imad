@@ -72,6 +72,9 @@
   <!-- interaction prompt -->
   <div id="prompt" class="hidden"><kbd id="prompt-key">E</kbd><span id="prompt-text">فتح المتجر</span></div>
 
+  <!-- quick help button -->
+  <button id="help-btn" title="كيفية اللعب">؟</button>
+
   <!-- boss bar -->
   <div id="bossbar" class="hidden">
     <div class="boss-name" id="boss-name">الدب الأسطوري</div>
@@ -128,7 +131,7 @@
 
     <div class="menu-buttons">
       <button class="btn btn-primary" id="btn-play"><span>ابدأ اللعب</span><em>PLAY</em></button>
-      <button class="btn" id="btn-controls"><span>التحكم</span><em>CONTROLS</em></button>
+      <button class="btn" id="btn-howto"><span>كيفية اللعب</span><em>HOW TO PLAY</em></button>
       <button class="btn" id="btn-settings"><span>الإعدادات</span><em>SETTINGS</em></button>
     </div>
 
@@ -139,38 +142,76 @@
     </div>
   </div>
 
-  <!-- CONTROLS panel -->
-  <div class="panel hidden" id="panel-controls">
-    <h2>التحكم</h2>
-    <ul class="keys">
-      <li><kbd>W A S D</kbd><span>الحركة</span></li>
-      <li><kbd>الفأرة</kbd><span>النظر / التصويب</span></li>
-      <li><kbd>زر أيسر</kbd><span>هجوم · صيد بالرمح قرب الماء</span></li>
-      <li><kbd>Shift</kbd><span>ركض</span></li>
-      <li><kbd>Space</kbd><span>قفز</span></li>
-      <li><kbd>Q</kbd><span>عجلة الأسلحة (اضغط واختر وأفلت)</span></li>
-      <li><kbd>1 … 7</kbd><span>اختيار سلاح مباشرة</span></li>
-      <li><kbd>F</kbd><span>التقاط اللوت / جمع الأعواد</span></li>
-      <li><kbd>C</kbd><span>إشعال النار / الطهي</span></li>
-      <li><kbd>E</kbd><span>المتجر / التحدث مع الناس</span></li>
-      <li><kbd>I / Tab</kbd><span>المحفظة</span></li>
-      <li><kbd>Esc</kbd><span>إيقاف مؤقت</span></li>
-    </ul>
-    <button class="btn btn-back">رجوع</button>
-  </div>
-
   <!-- SETTINGS panel -->
   <div class="panel hidden" id="panel-settings">
     <h2>الإعدادات</h2>
     <label class="opt"><span>مدى الرؤية</span>
-      <input type="range" id="opt-view" min="3" max="7" step="1" value="5"></label>
+      <input type="range" id="opt-view" min="3" max="7" step="1" value="5"><b class="opt-val" id="val-view">5</b></label>
     <label class="opt"><span>حساسية الفأرة</span>
-      <input type="range" id="opt-sens" min="4" max="20" step="1" value="10"></label>
+      <input type="range" id="opt-sens" min="2" max="30" step="1" value="10"><b class="opt-val" id="val-sens">10</b></label>
+    <label class="opt"><span>مستوى الصوت 🔊</span>
+      <input type="range" id="opt-vol" min="0" max="100" step="5" value="80"><b class="opt-val" id="val-vol">80%</b></label>
     <label class="opt"><span>جودة الظلال</span>
       <select id="opt-shadow"><option value="0">منخفضة</option><option value="1" selected>متوسطة</option><option value="2">عالية</option></select></label>
-    <label class="opt opt-check"><span>الأصوات</span>
-      <input type="checkbox" id="opt-audio" checked></label>
     <button class="btn btn-back">رجوع</button>
+  </div>
+</div>
+
+<!-- ===================== HOW TO PLAY (shared: menu + pause) ===================== -->
+<div id="howto" class="hidden">
+  <div class="howto-card">
+    <button class="inv-close" id="howto-close">✕</button>
+    <h2>❓ كيفية اللعب</h2>
+    <p class="howto-intro">أنت صيّاد في غابة لا نهائية. استكشف، قاتل، اجمع اللوت، طوّر أسلحتك،
+      وأنجز مهام أهل القرى… حتى تواجه <b>الدب الأسطوري (المستوى 100)</b>.</p>
+
+    <div class="howto-grid">
+      <div class="howto-sec">
+        <h3>🚶 التنقّل</h3>
+        <ul>
+          <li><span>للمشي في الغابة</span><kbd>W A S D</kbd></li>
+          <li><span>للنظر والتصويب</span><kbd>الفأرة</kbd></li>
+          <li><span>للركض بسرعة</span><kbd>Shift</kbd></li>
+          <li><span>للقفز</span><kbd>Space</kbd></li>
+          <li><span>لركوب/النزول عن الحصان</span><kbd>R</kbd></li>
+        </ul>
+      </div>
+      <div class="howto-sec">
+        <h3>⚔️ القتال</h3>
+        <ul>
+          <li><span>للهجوم / الضرب</span><kbd>زر أيسر</kbd></li>
+          <li><span>لفتح عجلة الأسلحة (اختر وأفلت)</span><kbd>Q</kbd></li>
+          <li><span>لاختيار سلاح مباشرة</span><kbd>1 … 7</kbd></li>
+          <li><span>لإطلاق السهام</span><kbd>القوس + زر أيسر</kbd></li>
+        </ul>
+      </div>
+      <div class="howto-sec">
+        <h3>🤝 التفاعل</h3>
+        <ul>
+          <li><span>لالتقاط اللوت / الحصاد / جمع البيض والحليب</span><kbd>F</kbd></li>
+          <li><span>لفتح المتجر أو التحدث مع الناس</span><kbd>E</kbd></li>
+          <li><span>لفتح المحفظة</span><kbd>I / Tab</kbd></li>
+        </ul>
+      </div>
+      <div class="howto-sec">
+        <h3>🔥 الأدوات والطبخ</h3>
+        <ul>
+          <li><span>لجمع الأعواد (قرب شجرة)</span><kbd>F</kbd></li>
+          <li><span>لإشعال النار (بعودين)</span><kbd>C</kbd></li>
+          <li><span>للطهي (قرب النار)</span><kbd>C</kbd></li>
+          <li><span>لصيد السمك (بالرمح قرب الماء)</span><kbd>زر أيسر</kbd></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="howto-tips">
+      <b>نصائح:</b>
+      <span>• تبدأ بلا سلاح — ابحث في اللوت أو اشترِ من <b>الحدّاد</b> وطوّر سلاحك.</span>
+      <span>• أنجز <b>مهام</b> أهل القرى (📜 من الحوار) لكسب الذهب.</span>
+      <span>• اطبخ اللحم والسمك على النار ليشفيا أكثر · احلب الأبقار واجمع بيض الدجاج.</span>
+      <span>• احذر <b>قطّاع الطرق</b> والذئاب ليلاً، وواجه <b>الدب الأسطوري</b> بعد أن تتسلّح.</span>
+    </div>
+    <button class="btn btn-primary howto-ok">فهمت، هيّا نلعب!</button>
   </div>
 </div>
 
@@ -179,6 +220,7 @@
   <div class="pause-card">
     <h2>إيقاف مؤقت</h2>
     <button class="btn btn-primary" id="btn-resume">متابعة</button>
+    <button class="btn" id="btn-help">❓ كيفية اللعب</button>
     <button class="btn" id="btn-quit">القائمة الرئيسية</button>
   </div>
 </div>

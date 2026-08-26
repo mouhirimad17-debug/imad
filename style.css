@@ -89,6 +89,35 @@ canvas#scene{position:fixed; inset:0; width:100%; height:100%; display:block; z-
 .opt select{background:#11220f; color:var(--ink); border:1px solid var(--stroke);
   border-radius:8px; padding:6px 10px; font-family:inherit}
 .opt-check input{width:22px; height:22px; accent-color:var(--moss)}
+.opt-val{min-width:44px; text-align:center; color:var(--gold); font-weight:800; font-size:14px}
+
+/* how-to-play overlay */
+#howto{position:fixed; inset:0; z-index:65; display:flex; align-items:center; justify-content:center;
+  padding:20px; background:linear-gradient(180deg, rgba(4,10,6,.86), rgba(4,10,6,.96)); backdrop-filter:blur(6px);
+  animation:fade .25s ease both; overflow:auto}
+.howto-card{position:relative; width:min(820px,96vw); background:linear-gradient(180deg, rgba(16,30,18,.97), rgba(8,16,10,.99));
+  border:1px solid var(--stroke); border-radius:18px; padding:24px 28px; box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.howto-card h2{font-size:30px; letter-spacing:.06em; margin-bottom:8px}
+.howto-intro{color:#cfe6cc; font-size:15px; line-height:1.6; margin-bottom:16px}
+.howto-intro b,.howto-tips b{color:var(--gold)}
+.howto-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px}
+@media(max-width:640px){.howto-grid{grid-template-columns:1fr}}
+.howto-sec{background:rgba(0,0,0,.28); border:1px solid var(--stroke); border-radius:14px; padding:14px 16px}
+.howto-sec h3{font-size:17px; color:#dfffe2; margin-bottom:10px}
+.howto-sec ul{list-style:none; display:flex; flex-direction:column; gap:8px}
+.howto-sec li{display:flex; align-items:center; justify-content:space-between; gap:12px}
+.howto-sec li span{color:#cfe6cc; font-size:14px}
+.howto-sec kbd{background:#11220f; border:1px solid var(--stroke); border-bottom-width:3px; border-radius:8px;
+  padding:5px 10px; font-family:inherit; font-weight:800; color:#bfe9c3; white-space:nowrap; font-size:13px}
+.howto-tips{display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.24); border:1px solid var(--stroke);
+  border-radius:12px; padding:12px 16px; margin-bottom:16px; font-size:13.5px; color:#cfe6cc; line-height:1.5}
+.howto-ok{width:100%; justify-content:center}
+
+/* quick help button in HUD */
+#help-btn{position:absolute; left:18px; top:250px; width:40px; height:40px; border-radius:50%;
+  background:var(--glass); border:1px solid var(--stroke); color:#bfe9c3; font-size:20px; font-weight:900;
+  cursor:pointer; pointer-events:auto; backdrop-filter:blur(4px); transition:border-color .2s, transform .1s}
+#help-btn:hover{border-color:var(--gold); color:var(--gold); transform:scale(1.08)}
 .btn-back{width:min(420px,88vw); justify-content:center; margin-top:8px}
 
 /* ============================ PAUSE / DEATH ============================ */

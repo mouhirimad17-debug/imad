@@ -383,7 +383,8 @@ const MODEL_CONF = {
   hen:      { span: 0.8 },
   fox:      { span: 1.5, anim: true },
   longhorn: { span: 2.4 },
-  house1:{ span: 6 }, house2:{ span: 6 }, house3:{ span: 5.2 }, house4:{ span: 5.2 }, house5:{ span: 6.5 }, house6:{ span: 6 },
+  // houses normalized by HEIGHT so every house towers well above the ~1.7m player
+  house1:{ height: 6.5 }, house2:{ height: 7 }, house3:{ height: 6 }, house4:{ height: 6 }, house5:{ height: 8 }, house6:{ height: 6.5 },
   plants1:{ height: 1.6 }, plants2:{ height: 1.1 }, plants4:{ height: 1.0 },
   tomato:{ height: 1.4 }, waterplant:{ height: 0.6 }, monstera:{ height: 1.1 },
 };
@@ -703,9 +704,9 @@ const SHOP_TYPES = [
 function buildVillage(cx, cz, group, colliders) {
   const r = rng((cx | 0) * 40503 ^ (cz | 0) * 1299721);
   const key = group.userData.key;
-  const COLS = 8, ROWS = 8, CELL = 8;                   // 8×8 grid with wide alleys → ~50 houses
+  const COLS = 7, ROWS = 7, CELL = 8.6;                 // 7×7 grid, wide alleys for tall houses
   const half = (COLS - 1) * CELL / 2;
-  const plaza = { c0: 3, c1: 4, r0: 3, r1: 4 };          // central 2×2 = plaza
+  const plaza = { c0: 3, c1: 3, r0: 3, r1: 3 };          // central plaza cell
   let shopBudget = 6;
   const wallMats = [MAT.wall, MAT.wall2];
   for (let ci = 0; ci < COLS; ci++) {
@@ -719,19 +720,19 @@ function buildVillage(cx, cz, group, colliders) {
       // some edge plots become shops
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
       const makeShop = shopBudget > 0 && edge && r() < 0.28;
-      const w = 3.6 + r() * 1.6, d = 3.6 + r() * 1.6, wallH = 2.8 + r() * 1.2;
+      const w = 5 + r() * 1.8, d = 5 + r() * 1.8, wallH = 4.2 + r() * 1.4;   // tall houses (> 2× player)
       // mostly GLB house models; ~28% procedural low-poly houses for extra variety
       const glb = r() < 0.72 ? instModel(HOUSE_KEYS[Math.floor(r() * HOUSE_KEYS.length)]) : null;
       const house = glb || makeHouse(r, w, d, wallH, wallMats[(ci + ri) & 1]);
       house.rotation.y = Math.atan2(cx - x, cz - z) + (r() < 0.5 ? 0 : Math.PI);
       house.position.set(x, h, z);
       group.add(house);
-      const cr = glb ? 2.7 : Math.max(w, d) * 0.6;
+      const cr = glb ? 3.2 : Math.max(w, d) * 0.62;
       colliders.push({ x, z, r: cr });
       if (makeShop) {
         shopBudget--;
         const st = SHOP_TYPES[shopBudget % SHOP_TYPES.length];
-        const sign = makeSign(st.sign); sign.position.set(0, (glb ? 4.2 : wallH + 1.4), 0);
+        const sign = makeSign(st.sign); sign.scale.set(4, 1.9, 1); sign.position.set(0, (glb ? 5.6 : wallH + 2), 0);
         house.add(sign);
         shops.push({ x, z, type: st.type, name: st.name, key });
       }
@@ -937,6 +938,12 @@ let locked = false;
 addEventListener('keydown', e => {
   if (e.repeat) return;
   keys[e.code] = true;
+  // how-to overlay is modal — Esc/H closes it from any screen
+  if (!$('howto').classList.contains('hidden')) {
+    if (e.code === 'Escape' || e.code === 'KeyH') closeHowto();
+    return;
+  }
+  if (state === 'play') { if (e.code === 'KeyH') { openHowto(); return; } }
   if (state === 'play' || state === 'wheel') {
     const dg = { Digit1:0, Digit2:1, Digit3:2, Digit4:3, Digit5:4, Digit6:5, Digit7:6 };
     if (e.code in dg) { if (state === 'wheel') { selectWeapon(dg[e.code]); closeWheel(); } else selectWeapon(dg[e.code]); }
@@ -2269,7 +2276,7 @@ function updateWeather(dt) {
   const stormy = weather.mode === 'عاصفة' || weather.mode === 'عاصفة رعدية';
   const dark = stormy ? 0.5 : weather.rain > 0.3 ? 0.72 : 1;
   weather.lightMul = lerp(weather.lightMul ?? 1, dark, dt * 2);   // day/night applies this
-  if (ambientNode) ambientNode.gain.value = 0.03 + weather.wind * 0.06 + weather.rain * 0.05;
+  if (ambientNode) ambientNode.gain.value = (0.03 + weather.wind * 0.06 + weather.rain * 0.05) * masterVol;
   updateSnow(dt);
   updateRain(dt);
   $('w-mode').textContent = weather.mode;
@@ -2767,7 +2774,7 @@ function fmtTime(s){ const m=Math.floor(s/60), ss=Math.floor(s%60); return `${St
 /* ----------------------------------------------------------------------------
  * 14. Audio (tiny WebAudio SFX)
  * -------------------------------------------------------------------------- */
-let audioCtx = null, audioOn = true, ambientNode = null;
+let audioCtx = null, audioOn = true, ambientNode = null, masterVol = 0.8;
 function initAudio() {
   if (audioCtx) return;
   try {
@@ -2784,35 +2791,35 @@ function initAudio() {
   } catch(e) {}
 }
 function sfx(type) {
-  if (!audioOn || !audioCtx) return;
-  const t = audioCtx.currentTime;
+  if (!audioOn || masterVol <= 0 || !audioCtx) return;
+  const t = audioCtx.currentTime, V = masterVol;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
   o.connect(g); g.connect(audioCtx.destination);
-  if (type==='swing'){ o.type='triangle'; o.frequency.setValueAtTime(320,t); o.frequency.exponentialRampToValueAtTime(120,t+0.12); g.gain.setValueAtTime(0.08,t);}
-  else if (type==='hit'){ o.type='square'; o.frequency.setValueAtTime(180,t); o.frequency.exponentialRampToValueAtTime(60,t+0.15); g.gain.setValueAtTime(0.14,t);}
-  else if (type==='hurt'){ o.type='sawtooth'; o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(70,t+0.2); g.gain.setValueAtTime(0.16,t);}
-  else if (type==='loot'){ o.type='sine'; o.frequency.setValueAtTime(660,t); o.frequency.exponentialRampToValueAtTime(1200,t+0.12); g.gain.setValueAtTime(0.1,t);}
+  if (type==='swing'){ o.type='triangle'; o.frequency.setValueAtTime(320,t); o.frequency.exponentialRampToValueAtTime(120,t+0.12); g.gain.setValueAtTime(0.08*V,t);}
+  else if (type==='hit'){ o.type='square'; o.frequency.setValueAtTime(180,t); o.frequency.exponentialRampToValueAtTime(60,t+0.15); g.gain.setValueAtTime(0.14*V,t);}
+  else if (type==='hurt'){ o.type='sawtooth'; o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(70,t+0.2); g.gain.setValueAtTime(0.16*V,t);}
+  else if (type==='loot'){ o.type='sine'; o.frequency.setValueAtTime(660,t); o.frequency.exponentialRampToValueAtTime(1200,t+0.12); g.gain.setValueAtTime(0.1*V,t);}
   g.gain.exponentialRampToValueAtTime(0.001, t+0.25);
   o.start(t); o.stop(t+0.28);
 }
 // a single tone with an optional frequency sweep
 function blip(freq, type, dur, vol, toFreq) {
-  if (!audioOn || !audioCtx) return;
+  if (!audioOn || masterVol <= 0 || !audioCtx) return;
   const t = audioCtx.currentTime;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
   o.type = type; o.frequency.setValueAtTime(freq, t);
   if (toFreq) o.frequency.exponentialRampToValueAtTime(Math.max(20, toFreq), t + dur);
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  g.gain.setValueAtTime(vol * masterVol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
 }
 function noiseBurst(dur, vol, cut) {
-  if (!audioOn || !audioCtx) return;
+  if (!audioOn || masterVol <= 0 || !audioCtx) return;
   const t = audioCtx.currentTime;
   const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
   const d = buf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1);
   const src = audioCtx.createBufferSource(); src.buffer = buf;
   const flt = audioCtx.createBiquadFilter(); flt.type = 'bandpass'; flt.frequency.value = cut;
-  const g = audioCtx.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(vol * masterVol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   src.connect(flt); flt.connect(g); g.connect(audioCtx.destination); src.start(t); src.stop(t + dur);
 }
 // distinct procedural sound per animal
@@ -2895,20 +2902,28 @@ function hide(id){ $(id).classList.add('hidden'); }
 
 // menu buttons
 $('btn-play').onclick = () => startGame();
-$('btn-controls').onclick = () => show('panel-controls');
+$('btn-howto').onclick = () => show('howto');
 $('btn-settings').onclick = () => show('panel-settings');
 document.querySelectorAll('.btn-back').forEach(b => b.onclick = e => e.target.closest('.panel').classList.add('hidden'));
 
+// how-to-play overlay (menu + in-game)
+function openHowto() { document.exitPointerLock?.(); show('howto'); }
+function closeHowto() { hide('howto'); if (state === 'play' && locked === false) canvas.requestPointerLock(); }
+$('howto-close').onclick = closeHowto;
+document.querySelector('.howto-ok').onclick = closeHowto;
+$('help-btn').onclick = openHowto;
+$('btn-help').onclick = () => show('howto');   // from pause overlay
+
 // settings
-$('opt-view').oninput = e => { VIEW = +e.target.value; scene.fog.far = CHUNK*(VIEW+0.6); };
-$('opt-sens').oninput = e => { MOUSE_SENS = +e.target.value * 0.00016; };
+$('opt-view').oninput = e => { VIEW = +e.target.value; scene.fog.far = CHUNK*(VIEW+0.6); $('val-view').textContent = e.target.value; };
+$('opt-sens').oninput = e => { MOUSE_SENS = +e.target.value * 0.00016; $('val-sens').textContent = e.target.value; };
+$('opt-vol').oninput = e => { masterVol = +e.target.value / 100; audioOn = masterVol > 0; $('val-vol').textContent = e.target.value + '%'; };
 $('opt-shadow').onchange = e => {
   const q = +e.target.value;
   renderer.shadowMap.enabled = q > 0;
   sun.shadow.mapSize.set(q>=2?4096:2048, q>=2?4096:2048);
   sun.castShadow = q > 0;
 };
-$('opt-audio').onchange = e => { audioOn = e.target.checked; };
 
 // pause
 function pauseGame(){ state='pause'; document.exitPointerLock?.(); show('pause'); }
