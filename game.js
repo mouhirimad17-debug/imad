@@ -1389,6 +1389,33 @@ function makeSnake(mat, size) {
   return g;
 }
 
+// a human bandit (biped) that raids the roads — front faces +X to match enemy turning
+function makeBandit() {
+  const g = new THREE.Group();
+  const cloth = MAT.npc.clone(); cloth.color.setHSL(0.03 + rand(0.06), 0.25, 0.18 + rand(0.12)); cloth.flatShading = true;
+  g.userData.mat = cloth;
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.36, 1.2, 8), cloth); torso.position.y = 1.15;
+  // head group (dips on attack)
+  const head = new THREE.Group(); head.position.set(0.05, 1.95, 0);
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8), MAT.skin);
+  const hood = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 6, 0, TAU, 0, 1.5), cloth); hood.position.y = 0.05;
+  const mask = new THREE.Mesh(GEO.unitBox, new THREE.MeshLambertMaterial({ color: 0x15110c })); mask.scale.set(0.34, 0.12, 0.28); mask.position.set(0.16, -0.02, 0);
+  head.add(skull, hood, mask);
+  const armGeo = new THREE.CapsuleGeometry(0.08, 0.55, 3, 6);
+  const backArm = new THREE.Mesh(armGeo, cloth); backArm.position.set(-0.34, 1.35, 0); backArm.rotation.z = -0.2;
+  const swordArm = new THREE.Mesh(armGeo, cloth); swordArm.position.set(0.34, 1.35, 0); swordArm.rotation.z = 0.6; swordArm.rotation.x = -0.4;
+  // a sword in the front hand (pointing +X = forward)
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.06, 0.03), new THREE.MeshStandardMaterial({ color: 0xcfd6dd, metalness: 0.8, roughness: 0.3 }));
+  blade.position.set(0.6, 1.05, 0);
+  const legGeo = new THREE.BoxGeometry(0.16, 0.9, 0.18); legGeo.translate(0, -0.45, 0);
+  const ll = new THREE.Mesh(legGeo, cloth); ll.position.set(0.02, 0.9, 0.13);
+  const rl = new THREE.Mesh(legGeo, cloth); rl.position.set(0.02, 0.9, -0.13);
+  g.add(torso, head, backArm, swordArm, blade, ll, rl);
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  g.userData.head = head; g.userData.legs = [ll, rl];
+  return g;
+}
+
 function spawnEnemy(type, x, z) {
   const h = terrainHeight(x, z);
   let mesh, hp, dmg, speed, radius, aggro, xp, name;
@@ -1452,6 +1479,9 @@ function spawnEnemy(type, x, z) {
     const tail = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.5, 4), MAT.scorp);
     tail.position.set(-0.5, 0.8, 0); tail.rotation.z = -1.0; mesh.add(tail);
     hp = 30; dmg = 12; speed = 4.8; radius = 0.6; xp = 20; name='عقرب'; hostile = true;
+  } else if (type === 'bandit') {
+    mesh = makeBandit();
+    hp = 105; dmg = 15; speed = 5.6; radius = 0.9; xp = 70; name='قاطع طريق'; hostile = true;
   } else { // bear boss
     mesh = makeQuadruped(MAT.fur, 1.8);
     hp = 2600; dmg = 34; speed = 4.6; radius = 2.6; xp = 1000; name='الدب الأسطوري'; hostile = true;
@@ -1499,7 +1529,8 @@ function killEnemy(e, dir) {
   gainXP(e.xp);
   toast(`قتلت ${e.name}`, e.type === 'bear' ? 'legendary' : '');
   // drop loot
-  dropLoot(e.mesh.position, e.type === 'bear' ? 'boss' : e.type === 'wolf' ? 'good' : 'basic');
+  dropLoot(e.mesh.position, e.type === 'bear' ? 'boss' : (e.type === 'wolf' || e.type === 'bandit') ? 'good' : 'basic');
+  if (e.type === 'bandit') { const g = randi(25, 70); player.gold += g; toast(`🪙 +${g} من قاطع الطريق`, ''); }
   if (e.type === 'bear') { hideBossBar(); objectiveText('انتصرت على الدب الأسطوري! انهب الكنز.'); }
   // sink + remove
   e.deathT = 0;
@@ -1518,6 +1549,7 @@ function updateEnemies(dt) {
     }
     e.hitFlash = Math.max(0, e.hitFlash - dt);
     e.attackCd = Math.max(0, e.attackCd - dt);
+    if (e.productCd) e.productCd = Math.max(0, e.productCd - dt);
     if (e.mesh.userData.mixer) e.mesh.userData.mixer.update(dt);   // GLB animation
 
     // the horse the player is riding is driven by updatePlayer, not AI
@@ -1645,22 +1677,24 @@ function manageSpawns(dt) {
       const r = Math.random();
       let t;
       if (desert) {                                                              // desert wildlife
-        if (r < 0.28) t = 'scorpion';
-        else if (r < 0.48) t = 'snake';
-        else if (r < 0.66) t = 'rabbit';
-        else if (r < 0.82) t = 'wolf';
+        if (r < 0.26) t = 'scorpion';
+        else if (r < 0.44) t = 'snake';
+        else if (r < 0.60) t = 'rabbit';
+        else if (r < 0.74) t = 'wolf';
+        else if (r < 0.84) t = 'bandit';                                         // desert raiders
         else t = mounts < 2 ? 'camel' : 'boar';                                  // camels to ride
       } else {                                                                   // forest wildlife
-        if (r < 0.15) t = 'deer';
-        else if (r < 0.27) t = 'rabbit';
-        else if (r < 0.38) t = 'chicken';
-        else if (r < 0.46) t = 'fox';
-        else if (r < 0.52) t = 'cow';
-        else if (r < 0.59) t = 'cat';
-        else if (r < 0.66) t = 'dog';
-        else if (r < 0.73) t = 'snake';
-        else if (r < 0.84) t = 'wolf';
-        else if (r < 0.93) t = 'boar';
+        if (r < 0.14) t = 'deer';
+        else if (r < 0.25) t = 'rabbit';
+        else if (r < 0.35) t = 'chicken';
+        else if (r < 0.43) t = 'fox';
+        else if (r < 0.49) t = 'cow';
+        else if (r < 0.55) t = 'cat';
+        else if (r < 0.61) t = 'dog';
+        else if (r < 0.68) t = 'snake';
+        else if (r < 0.79) t = 'wolf';
+        else if (r < 0.88) t = 'boar';
+        else if (r < 0.95) t = 'bandit';                                         // roadside bandits
         else t = mounts < 3 ? 'horse' : 'deer';                                  // keep horses around
       }
       spawnEnemy(t, x, z);
@@ -1806,8 +1840,27 @@ function tryInteract() {
     if (d < bd) { bd = d; best = l; }
   }
   if (best) { pickup(best); return; }
-  if (gatherCrop()) return;   // harvest a farm crop
-  gatherSticks();             // otherwise try gathering sticks from a nearby tree
+  if (gatherCrop()) return;          // harvest a farm crop
+  if (gatherAnimalProduct()) return; // egg from a hen / milk from a cow
+  gatherSticks();                    // otherwise try gathering sticks from a nearby tree
+}
+// collect egg from a nearby hen or milk from a nearby cow (with a cooldown)
+function nearProductAnimal() {
+  for (const e of enemies) {
+    if (!e.alive || (e.type !== 'chicken' && e.type !== 'cow')) continue;
+    if ((e.productCd || 0) > 0) continue;
+    if (Math.hypot(e.mesh.position.x - player.pos.x, e.mesh.position.z - player.pos.z) < 2.8) return e;
+  }
+  return null;
+}
+function gatherAnimalProduct() {
+  const e = nearProductAnimal(); if (!e) return false;
+  e.productCd = 30;
+  if (e.type === 'chicken') { addItem('egg', 1, 'common'); toast('🥚 جمعت بيضة', ''); }
+  else { addItem('milk', 1, 'common'); toast('🥛 حلبت البقرة', ''); }
+  sfx('loot'); critterSound(e.type, 0.1);
+  if (state === 'inv') renderInventory();
+  return true;
 }
 function nearCrop() {
   for (const c of crops) if (!c.harvested && Math.hypot(c.x - player.pos.x, c.z - player.pos.z) < 2.6) return c;
@@ -1999,6 +2052,7 @@ Object.assign(ITEMS, {
   turban: { id:'turban',name:'عمامة', icon:'👳', type:'material' },
   tomato: { id:'tomato',name:'طماطم', icon:'🍅', type:'food', heal:14 },
   egg:    { id:'egg',   name:'بيض',   icon:'🥚', type:'food', heal:12 },
+  milk:   { id:'milk',  name:'حليب',  icon:'🥛', type:'food', heal:16, stam:15 },
 });
 
 let currentShop = null;
@@ -2123,6 +2177,9 @@ const QUEST_DEFS = [
   { kind:'gather', item:'pelt',   label:t=>`اجمع ${t} فراء`,         need:()=>4,            gold:100 },
   { kind:'gather', item:'meatC',  label:t=>`اطبخ وأحضر ${t} لحم مطبوخ`, need:()=>3,         gold:120 },
   { kind:'gather', item:'tomato', label:t=>`احصد ${t} طماطم من المزرعة`, need:()=>6+randi(0,4), gold:90 },
+  { kind:'kill',   species:'bandit', label:t=>`طهّر الطرق من ${t} قطّاع طرق`, need:()=>3, gold:180 },
+  { kind:'gather', item:'egg',    label:t=>`اجمع ${t} بيضات`, need:()=>4, gold:70 },
+  { kind:'gather', item:'milk',   label:t=>`احلب ${t} أباريق حليب`, need:()=>3, gold:75 },
 ];
 function countItem(id) { const s = inventory.find(x => x.id === id); return s ? s.qty : 0; }
 function questProgress() { if (!quest) return 0; return quest.kind === 'gather' ? Math.min(countItem(quest.item), quest.need) : quest.count; }
@@ -2170,6 +2227,7 @@ function updatePrompt() {
   else if (nearestShop()) set('E', `متجر ${nearestShop().name}`);
   else if (nearestNPC()) set('E', `التحدث إلى ${nearestNPC().name}`);
   else if (nearCrop()) set('F', 'حصاد المحصول 🍅');
+  else if (nearProductAnimal()) set('F', nearProductAnimal().type === 'chicken' ? 'جمع البيض 🥚' : 'حلب البقرة 🥛');
   else if (nearLitFire()) set('C', 'الطهي على النار');
   else if (invCount('stick') >= 2) set('C', 'إشعال نار (عودان)');
   else if (nearTreeForSticks()) set('F', 'جمع الأعواد');
