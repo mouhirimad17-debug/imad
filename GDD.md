@@ -1,159 +1,178 @@
-# Game Design Document — **ORBITAL SIEGE**
-### *Defend the Last Station*
+# وثيقة تصميم اللعبة — **ELDERWOOD** (غابة الأبدية)
+### *قتال بقايا الأسطورة — لعبة قتالية 3D في غابة لا منتهية*
 
-A premium, mobile-first **2D space combat** game built with **Three.js**, featuring
-realistic PBR-lit metallic ships, procedural nebula shaders, real-time bloom,
-and a signature **Focus (bullet-time deflector)** mechanic.
-
----
-
-## 1. High Concept
-
-You are the pilot of **LANCE‑7**, the last defense fighter guarding the orbital
-station **AEGIS** as it drifts around a dying star. A machine swarm — *the Scourge* —
-attacks in escalating waves. Survive, defeat three colossal bosses, and salvage
-wreckage to upgrade your ship in the field.
-
-> **One line:** A juicy, realistic 2D space survivor-shooter for phones, where
-> slowing time turns your shield into a weapon.
+لعبة قتال **بمنظور الشخص الأول (FPS melee)** مبنية بالكامل بـ **Three.js / WebGL**
+للحاسوب. عالم **غابة إجرائي لا نهائي** (procedural infinite forest) يُولَّد لحظياً
+حول اللاعب: جبال، هضاب، سهول، وديان، بحيرات، أشجار، عشب، ورود، قرى، وحيوانات —
+مع خصم أسطوري: **الدب (المستوى 100)** الذي **يتقلّص كلما أصبته**.
 
 ---
 
-## 2. Pillars
+## 1. المفهوم العام (High Concept)
 
-1. **Realistic, not cartoon.** 3D metallic ships lit by real lights, volumetric
-   nebulae, bloom, sparks, shockwaves, and screen shake. No anime aesthetic.
-2. **Made for thumbs.** One-finger drag to fly, auto-fire, and a single Focus
-   button. Playable with one hand in portrait.
-3. **A signature verb.** *Focus* slows time to 35% and raises a **deflector
-   shield** that shreds incoming fire — risk vs. reward around a Focus meter.
-4. **Always progressing.** Salvage → upgrades between every wave; 12 curated
-   waves + 3 bosses + endless mode; persistent high score & best wave.
+> أنت صيّاد وحيد في غابة لا تنتهي. تجمع الغنائم، تصطاد الغزلان، تقاتل قطعان الذئاب،
+> وتستكشف عالماً يُولَد تحت قدميك بلا حدود — بحثاً عن **الدب الأسطوري**، الوحش
+> الذي حرس هذه الغابة منذ الأزل. اهزمه لتنال كنزه الأسطوري.
 
----
-
-## 3. Core Loop
-
-Fly & dodge → auto-fire kills enemies → enemies drop **salvage** & **power-ups**
-→ clear the wave → spend salvage in the **field workshop** → next, harder wave →
-boss every 4th wave → win at Wave 12 → **Endless** for the leaderboard.
-
-Micro-loop: **Move → Shoot → Focus-deflect the dangerous shot → collect drops.**
+- **النوع:** Action / Survival / Melee-Combat (منظور أول).
+- **المنصة:** الحاسوب (فأرة + لوحة مفاتيح).
+- **المحرك:** Three.js (r160) — بدون خوادم، يعمل في المتصفح مباشرة.
+- **الجلسة النموذجية:** 5–20 دقيقة لكل محاولة.
 
 ---
 
-## 4. Controls (mobile-first)
+## 2. الحلقة الأساسية للعب (Core Loop)
 
-| Action | Touch | Desktop |
+```
+استكشف الغابة  →  اصطد الحيوانات / قاتل الذئاب  →  اجمع الغنائم والذهب والخبرة
+      ↑                                                          │
+      └──────────  ارتقِ في المستوى وقوِّ نفسك  ←──────────────────┘
+                                    │
+                          واجه الدب الأسطوري (Lv.100)
+```
+
+---
+
+## 3. العالم (World)
+
+### 3.1 التضاريس اللانهائية
+- **تقسيم إلى Chunks** بحجم 64×64 وحدة، تُحمَّل وتُفرَّغ ديناميكياً حول اللاعب
+  (نصف قطر رؤية 3–7 chunks حسب الإعدادات).
+- ارتفاع الأرض يُحسب من **value-noise + fBm + ridged noise**، ما ينتج:
+  - **جبال** عالية بقمم صخرية وثلجية.
+  - **هضاب وتلال** متموّجة.
+  - **سهول** خضراء منبسطة.
+  - **وديان وأنهار** محفورة عبر noise إضافي.
+- **بحيرات:** أي منطقة تحت منسوب الماء (`WATER = 4.2`) تتلقى سطح ماء شبه شفاف.
+
+### 3.2 التلوين البيئي (Biomes)
+لون كل قمة (vertex) يُحدَّد بالارتفاع والانحدار:
+| المنطقة | الشرط | اللون |
 |---|---|---|
-| Move ship | Drag anywhere | Mouse move / WASD / Arrows |
-| Fire | Automatic | Automatic |
-| **Focus** (bullet-time + deflector) | Hold the **FOCUS** button (or 2nd finger) | Hold **Space / Shift** |
-| Pause | Pause button | **P / Esc** |
-| Collect power-up | Fly into it | same |
+| رمل الشاطئ | قرب الماء | بيج |
+| عشب | ارتفاع متوسط، انحدار قليل | أخضر متدرّج |
+| صخر | انحدار عالٍ أو ارتفاع كبير | رمادي |
+| ثلج | القمم العالية | أبيض |
+
+### 3.3 العناصر النباتية والمعالم
+- **أشجار صنوبر** (جذع + ٣ طبقات مخروطية) — instanced لكل chunk.
+- **عشب** بنسيج إجرائي (crossed-plane tufts) + **ورود** ملوّنة عشوائياً.
+- **صخور** متناثرة.
+- **قرى** (منازل خشبية بأسقف مثلثة) كمعالم نادرة تظهر على الخريطة.
+- **أسماك** تسبح في البحيرات القريبة (تُولَّد وتُفرَّغ ديناميكياً).
 
 ---
 
-## 5. Signature Mechanic — **FOCUS**
+## 4. اللاعب (Player)
 
-Holding Focus:
-- **Time dilates** to 35% for enemies & enemy bullets (you stay responsive).
-- A **deflector ring** around LANCE‑7 destroys enemy bullets it touches.
-- Your weapon converges into a **concentrated lance beam** (high DPS).
-- Drains the **Focus meter**; empties → auto-disengage. Regenerates when idle.
-
-This creates a clutch, skill-expressive out: dive into a bullet storm, slow it,
-carve a path, and punish the boss — but manage the meter.
+- **الحركة:** WASD، **ركض** (Shift يستهلك الطاقة)، **قفز** (Space)، جاذبية،
+  والتصاق بالتضاريس عبر نفس دالة الارتفاع (collision دقيق).
+- **الكاميرا:** منظور أول مع **Pointer Lock** (الفأرة للنظر/التصويب).
+- **الإحصاءات:** الصحة (HP)، الطاقة (Stamina)، المستوى + شريط الخبرة (XP).
+- **الارتقاء:** كل مستوى يزيد الصحة القصوى ويعيد ملأها.
 
 ---
 
-## 6. Ship Resources
+## 5. القتال والأسلحة (Combat)
 
-- **Hull (HP):** no passive regen; restored by *Repair* drops & upgrades.
-- **Shield:** absorbs damage; **auto-regenerates** after 4s without a hit.
-- **Focus:** fuels the Focus mechanic; regenerates over time.
-- **Heat/decay is intentionally omitted** to keep the phone UX clean.
+كشف الإصابة يعتمد على **مدى + قوس أمامي** (arc) أمام الكاميرا، مع **ارتداد** للعدو.
+
+| السلاح | الضرر | المدى | السرعة | الطابع |
+|---|---|---|---|---|
+| 🗡️ **خنجر** | 16 | قصير | سريع جداً | نقرات متتابعة |
+| ⚔️ **سيف** | 34 | متوسط | متوازن | السلاح الافتراضي |
+| 🔱 **رمح** | 46 | طويل | بطيء | يضرب من بعيد |
+
+- **Viewmodel** ثلاثي الأبعاد لكل سلاح مع أنيميشن ضربة (swing) واهتزاز مشي.
+- التبديل بالأزرار **1 / 2 / 3**.
 
 ---
 
-## 7. Enemies
+## 6. الأعداء والحياة البرية (Enemies & Wildlife)
 
-| Unit | Behavior |
+| الكائن | الصحة | السلوك | المكافأة |
+|---|---|---|---|
+| 🦌 **غزال** | 40 | مسالم، يهرب عند الاقتراب/الإصابة | خبرة + لوت أساسي |
+| 🐺 **ذئب** | 70 | مهاجم، يطارد ويعض | خبرة + لوت جيد |
+| 🐻 **الدب الأسطوري** | كبيرة جداً | **زعيم المستوى 100** | كنز أسطوري |
+
+### آلية الدب الفريدة — «يتقلّص عن الضرر»
+> حجم الدب مرتبط بصحته: كلما نقصت صحته **تقلّص حجمه** تدريجياً (حتى ~45% من حجمه)،
+> فتشعر بصرياً بأنك تُنهك الوحش وتقترب من هزيمته. شريط زعيم مخصّص يظهر أعلى الشاشة.
+
+الأعداء تُدار بنظام **spawn ديناميكي** يبقي عدداً محدوداً من الحياة البرية حول اللاعب،
+ويستدعي الدب بعد فترة استكشاف أو بعد عدد كافٍ من عمليات القتل.
+
+---
+
+## 7. نظام الغنائم (Loot)
+
+غنائم بمستويات ندرة ملوّنة، تسقط من الأعداء (والدب يُسقط ٥ قطع):
+
+| الندرة | اللون | المضاعف |
+|---|---|---|
+| عادي | رمادي | ×1 |
+| غير مألوف | أخضر | ×1.6 |
+| نادر | أزرق | ×2.4 |
+| ملحمي | بنفسجي | ×3.6 |
+| **أسطوري** | ذهبي | ×6 |
+
+كل قطعة لها **عمود ضوئي** بلونها، وتُلتقط بالزر **F**. بعض الغنائم (أعشاب/تعاويذ) **تشفي** اللاعب.
+
+---
+
+## 8. واجهة اللاعب (HUD / UI)
+
+- **خريطة دائرية** أعلى اليسار: تدور مع اتجاه اللاعب، تُظهر التضاريس، القرى (ذهبي)،
+  الأعداء (دب أحمر / ذئب برتقالي / غزال أخضر)، والغنائم بألوان ندرتها + الإحداثيات.
+- **شريط زعيم** أعلى الوسط للدب.
+- **الصحة/الطاقة/الخبرة** أسفل اليسار.
+- **عجلة الأسلحة** أسفل الوسط.
+- **المهمة + الذهب + القتلى + الوقت** أعلى اليمين.
+- **إشعارات (toasts)** للغنائم والارتقاء، **crosshair**، و**vignette** أحمر عند الإصابة.
+
+### واجهة رئيسية (Main Menu) بطابع AAA
+مشهد غابة ثلاثي الأبعاد يدور خلف القائمة، عنوان متدرّج، أزرار (ابدأ اللعب / التحكم /
+الإعدادات)، شاشة تحميل، وقوائم إيقاف مؤقت وموت.
+
+---
+
+## 9. الإعدادات (Settings)
+مدى الرؤية · حساسية الفأرة · جودة الظلال · تشغيل/إيقاف الصوت.
+
+---
+
+## 10. الصوت (Audio)
+WebAudio إجرائي بالكامل: **رياح محيطة** + مؤثرات (ضربة/إصابة/جرح/التقاط).
+
+---
+
+## 11. التحكم (Controls)
+
+| المفتاح | الوظيفة |
 |---|---|
-| **Drone** | Cheap swarmer, drifts in, light shots. |
-| **Interceptor** | Fast diagonal dive, brief burst fire. |
-| **Gunship** | Tanky, fires a 3-way spread. |
-| **Mine** | Floats down, detonates on contact / when shot. |
-| **Weaver** | Sine-wave strafer, rapid single shots. |
+| `W A S D` | الحركة |
+| الفأرة | النظر / التصويب |
+| زر أيسر | هجوم |
+| `Shift` | ركض |
+| `Space` | قفز |
+| `1 2 3` | تبديل السلاح |
+| `F` | التقاط اللوت / تفاعل |
+| `Esc` | إيقاف مؤقت |
 
-**Bosses**
-- **W4 — Hive Carrier:** spawns drones, sweeping cannon.
-- **W8 — Lance Reaver:** dashes, radial bullet bursts.
-- **W12 — Scourge Sovereign:** multi-phase; beams, spirals, summons.
-
----
-
-## 8. Progression & Economy
-
-- **Salvage** earned per kill (scaled by unit value).
-- **Field Workshop** (between waves): Damage, Fire Rate, Multi-shot, Max Hull,
-  Shield Capacity, Shield Regen, Focus Capacity, Move Speed, Magnet radius.
-- Upgrades are **per-run (roguelite)**; **high score & best wave persist**.
-
-**Power-up drops:** Repair, Shield Cell, Overcharge (temp fire-rate), Spread
-(temp side guns), Focus Cell (refill).
+> **تلميح تطوير:** أضف `#boss` إلى الرابط لاستدعاء الدب الأسطوري فوراً عند بدء اللعب.
 
 ---
 
-## 9. Waves / Levels
-
-12 hand-tuned waves with rising density & new unit intros; bosses on 4/8/12.
-Clearing 12 unlocks **Endless** (procedural scaling) for score chasing.
-
----
-
-## 10. Art & Audio Direction
-
-- **Look:** deep-space blacks, cyan/amber energy, orange dying star, parallax
-  starfields, drifting **procedural nebula** (fbm shader), lens glow, **bloom**.
-- **Ships:** procedurally-built low-poly **metallic** meshes, PBR materials,
-  a key directional light + engine point-lights → real shading & specular.
-- **FX:** GPU point-particle bursts, expanding shockwave rings, hit sparks,
-  muzzle flashes, damage flashes, **screen shake**.
-- **Audio:** fully **procedural WebAudio** synthesis (no asset downloads):
-  lasers, explosions, hits, power-ups, UI, and an ambient drone. Volume mixer.
+## 12. البنية التقنية (Tech)
+- ملف واحد `game.js` منظّم في وحدات: أدوات، عالم/تضاريس، مدير chunks، لاعب،
+  أسلحة/قتال، أعداء/ذكاء اصطناعي، أسماك، لوت، جسيمات، خريطة، HUD، صوت، قائمة، حلقة رئيسية.
+- **InstancedMesh** لكل العناصر المتكررة (أشجار/صخور/عشب/ورود) للأداء.
+- **ظلال PCFSoft**، **bloom** خفيف، **ACES tonemapping**، سماء بـ shader متدرّج + قرص شمس.
+- كل شيء إجرائي — لا حاجة لأصول خارجية أو خادم.
 
 ---
 
-## 11. UX / Screens
-
-Loading → animated **Main Menu** → How-to-Play → gameplay **HUD** (score, wave,
-salvage, hull, shield, focus) → **Pause** → **Field Workshop** → **Game Over**
-with run stats → Settings (volume, quality, bloom, haptics).
-
-- **Quality toggle** (bloom & particle density) for low-end phones.
-- **Responsive** contain-fit arena so play is fair on any screen.
-- **Haptics** (vibration) on hits where supported.
-
----
-
-## 12. Tech
-
-- **Three.js** (ESM via import-map / CDN), orthographic camera on the XY plane
-  for true 2D play with 3D-lit objects.
-- **EffectComposer + UnrealBloom** post-processing for realistic glow.
-- Object pools for bullets/particles; single GPU **Points** system for FX.
-- `localStorage` for persistence; graceful WebGL/feature fallbacks.
-- Single-origin static files — host anywhere (GitHub Pages, any static host).
-
----
-
-## 13. Win / Lose
-
-- **Lose:** Hull reaches 0 → Game Over (run stats, retry).
-- **Win:** Clear Wave 12 → victory → continue into **Endless**.
-
----
-
-*This document is implemented by the code in this repository (`index.html`,
-`style.css`, `game.js`).*
+## 13. أفكار مستقبلية (Roadmap)
+- ليل/نهار ودورة طقس. · نظام تحسين الأسلحة بالغنائم. · زعماء إضافيون. · حفظ التقدّم.
+- طهي/جمع موارد. · مطاردة الأسماك بالرمح. · مهام القرى (NPCs).
