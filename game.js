@@ -146,8 +146,18 @@ function baseHeight(x, z) {
 // a chunk carries a village iff this deterministic (hash-only) test passes AND
 // the underlying land is a suitable low-mid elevation — computed without the
 // flatten pass so there's no recursion.
-const VILLAGE_FLAT_R = 32, VILLAGE_FALLOFF = 14;   // flat core + smooth skirt
-const VILLAGE_POND_OFF = 17, VILLAGE_POND_R = 6, VILLAGE_POND_D = 1.6;  // small lake by each town
+const VILLAGE_FLAT_R = 34, VILLAGE_FALLOFF = 16;   // flat core + smooth skirt
+// each town has a big lake feeding a river/wadi that runs past it, crossed by a bridge
+const RIVER_X_OFF = 17.6;            // channel sits on the reserved corridor column
+const RIVER_HW = 2.7, RIVER_DEPTH = 1.7;
+const LAKE_Z_OFF = 23, LAKE_R = 12, LAKE_DEPTH = 2.1;
+// bridges: walkable decks over carved channels {x,z,hw,hd,y,key}
+const bridges = [];
+function bridgeDeckAt(x, z) {
+  for (const b of bridges) if (Math.abs(x - b.x) <= b.hw && Math.abs(z - b.z) <= b.hd) return b.y;
+  return -Infinity;
+}
+function groundHeightAt(x, z) { return Math.max(terrainHeight(x, z), bridgeDeckAt(x, z)); }
 function villageBase(cx, cz) {
   if (hash2(cx + 999, cz - 999) <= 0.93) return null;
   const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
@@ -177,9 +187,17 @@ function terrainHeight(x, z) {
       const t = 1 - smooth(clamp((d - VILLAGE_FLAT_R) / VILLAGE_FALLOFF, 0, 1));
       h = lerp(h, v.y, t);   // blend to the flat village level
     }
-    // a small village pond, carved just off the main road (a lake by the town)
-    const pd = Math.hypot(x - (v.x + VILLAGE_POND_OFF), z - v.z);
-    if (pd < VILLAGE_POND_R) h -= VILLAGE_POND_D * smooth(clamp(1 - pd / VILLAGE_POND_R, 0, 1));
+    // a big lake + a river/wadi flowing past the town (carved into the flat land)
+    const rx = v.x + RIVER_X_OFF;
+    let carve = 0;
+    const dRiver = Math.abs(x - rx);
+    if (dRiver < RIVER_HW) {                                  // channel along the corridor
+      const zFade = smooth(clamp((30 - Math.abs(z - v.z)) / 6, 0, 1));  // taper the ends smoothly
+      carve = Math.max(carve, RIVER_DEPTH * smooth(1 - dRiver / RIVER_HW) * zFade);
+    }
+    const dLake = Math.hypot(x - rx, z - (v.z + LAKE_Z_OFF));  // lake at the river's head
+    if (dLake < LAKE_R) carve = Math.max(carve, LAKE_DEPTH * smooth(1 - dLake / LAKE_R));
+    h -= carve;
   }
   const o = oasisAt(cx, cz);
   if (o) {
@@ -806,10 +824,12 @@ function buildVillage(cx, cz, group, colliders) {
 
   for (let ci = 0; ci < COLS; ci++) {
     for (let ri = 0; ri < ROWS; ri++) {
-      if (ci === ROAD || ri === ROAD) continue;           // keep the central cross clear (roads + plaza)
+      if (ci === ROAD || ri === ROAD || ci === 5) continue;  // clear cross roads + the river corridor (col 5)
       const x = cx + (ci * CELL - half);                  // aligned, no jitter
       const z = cz + (ri * CELL - half);
-      if (Math.hypot(x - (cx + VILLAGE_POND_OFF), z - cz) < VILLAGE_POND_R + 3) continue;  // keep the pond clear
+      // keep houses out of the river channel and the lake
+      if (Math.abs(x - (cx + RIVER_X_OFF)) < RIVER_HW + 3) continue;
+      if (Math.hypot(x - (cx + RIVER_X_OFF), z - (cz + LAKE_Z_OFF)) < LAKE_R + 3) continue;
       if (terrainHeight(x, z) < WATER + 1 || terrainSlope(x, z) > 0.4) continue;
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
       const makeShop = shopBudget > 0 && edge && r() < 0.3;
@@ -851,28 +871,66 @@ function buildVillage(cx, cz, group, colliders) {
   const dirt = new THREE.Mesh(new THREE.CircleGeometry(9, 20), MAT.dirt);
   dirt.rotation.x = -Math.PI/2; dirt.position.set(cx, hc + 0.02, cz); group.add(dirt);
 
-  // a small lake/pond just off the road (carved in terrainHeight above)
-  const px = cx + VILLAGE_POND_OFF, pz = cz, pWaterY = hc - 0.35;
-  const pondGeo = new THREE.CircleGeometry(VILLAGE_POND_R - 0.5, 40); pondGeo.rotateX(-Math.PI/2);
-  const pondM = new THREE.Mesh(pondGeo, waterMat);
-  pondM.position.set(px, pWaterY, pz); pondM.userData.isWater = true; group.add(pondM);
+  // ---- big lake + river/wadi + a bridge across it (carved in terrainHeight) ----
+  const rx = cx + RIVER_X_OFF, waterY = hc - 0.3, lakeZ = cz + LAKE_Z_OFF;
+  // river channel water (a long strip along the corridor)
+  const riverGeo = new THREE.PlaneGeometry(RIVER_HW * 2 - 0.4, 56); riverGeo.rotateX(-Math.PI/2);
+  const riverM = new THREE.Mesh(riverGeo, waterMat);
+  riverM.position.set(rx, waterY, cz); riverM.userData.isWater = true; group.add(riverM);
+  // lake water at the head of the river
+  const lakeGeo = new THREE.CircleGeometry(LAKE_R - 1, 52); lakeGeo.rotateX(-Math.PI/2);
+  const lakeM = new THREE.Mesh(lakeGeo, waterMat);
+  lakeM.position.set(rx, waterY, lakeZ); lakeM.userData.isWater = true; group.add(lakeM);
   group.userData.hasWater = true;
-  group.userData.waterCenter = { x: px, z: pz, y: pWaterY, r: VILLAGE_POND_R - 2 };
-  // reeds around the village pond
+  group.userData.waterCenter = { x: rx, z: lakeZ, y: waterY, r: LAKE_R - 3 };
+  // reeds + grass along the lake shore
   const vReedGeo = new THREE.CylinderGeometry(0.03, 0.05, 1.2, 4); vReedGeo.translate(0, 0.6, 0);
-  const vReedIM = new THREE.InstancedMesh(vReedGeo, new THREE.MeshLambertMaterial({ color: 0x4f7a35 }), 18);
+  const vReedIM = new THREE.InstancedMesh(vReedGeo, new THREE.MeshLambertMaterial({ color: 0x4f7a35 }), 40);
   const _vm = new THREE.Matrix4(), _vq = new THREE.Quaternion(), _vv = new THREE.Vector3(), _vs = new THREE.Vector3(1,1,1);
   let vrc = 0;
-  for (let i = 0; i < 18; i++) {
-    const a = r() * TAU, dd = VILLAGE_POND_R - 0.6 + r() * 1.1;
-    const wx = px + Math.cos(a) * dd, wz = pz + Math.sin(a) * dd;
+  for (let i = 0; i < 26; i++) {
+    const a = r() * TAU, dd = LAKE_R - 0.6 + r() * 1.4;
+    const wx = rx + Math.cos(a) * dd, wz = lakeZ + Math.sin(a) * dd;
     _vm.compose(_vv.set(wx, terrainHeight(wx, wz), wz), _vq.setFromAxisAngle(_vv.set(0,1,0), r()*TAU), _vs);
     vReedIM.setMatrixAt(vrc++, _vm);
   }
+  for (let i = 0; i < 14; i++) {   // reeds along the river banks
+    const side = r() < 0.5 ? -1 : 1, zz = cz + rand(26, -26);
+    const wx = rx + side * (RIVER_HW + 0.3), wz = zz;
+    _vm.compose(_vv.set(wx, terrainHeight(wx, wz), wz), _vq.setFromAxisAngle(_vv.set(0,1,0), r()*TAU), _vs);
+    if (vrc < 40) vReedIM.setMatrixAt(vrc++, _vm);
+  }
   vReedIM.count = vrc; vReedIM.instanceMatrix.needsUpdate = true; group.add(vReedIM);
+  // a wooden bridge where the main road crosses the river (people walk over it)
+  buildBridge(rx, cz, hc + 0.25, group);
+  bridges.push({ x: rx, z: cz, hw: RIVER_HW + 1.6, hd: 1.9, y: hc + 0.25, key });
 
   // many townsfolk (spread across the town)
   spawnTownNPCs(cx, cz, group, key, r);
+}
+// a plank bridge spanning the river along X, centred at (bx,bz), deck at `y`
+function buildBridge(bx, bz, y, group) {
+  const span = (RIVER_HW + 1.6) * 2, wide = 3.6;
+  const deck = new THREE.Mesh(GEO.unitBox, MAT.wood);
+  deck.scale.set(span, 0.22, wide); deck.position.set(bx, y, bz); deck.castShadow = deck.receiveShadow = true;
+  group.add(deck);
+  // railings on both sides
+  for (const s of [-1, 1]) {
+    const rail = new THREE.Mesh(GEO.unitBox, MAT.wood);
+    rail.scale.set(span, 0.5, 0.14); rail.position.set(bx, y + 0.45, bz + s * (wide/2 - 0.1));
+    group.add(rail);
+    for (let k = -1; k <= 1; k++) {   // posts
+      const post = new THREE.Mesh(GEO.unitBox, MAT.wood);
+      post.scale.set(0.18, 0.9, 0.18); post.position.set(bx + k * (span/2 - 0.3), y + 0.2, bz + s * (wide/2 - 0.1));
+      group.add(post);
+    }
+  }
+  // support piers into the water
+  for (const s of [-1, 1]) {
+    const pier = new THREE.Mesh(GEO.unitBox, MAT.wood);
+    pier.scale.set(0.3, 2.0, 0.3); pier.position.set(bx + s * (RIVER_HW - 0.2), y - 1.0, bz);
+    group.add(pier);
+  }
 }
 
 // a palm tree (trunk + radiating fronds)
@@ -1182,8 +1240,8 @@ function updatePlayer(dt) {
   // obstacle physics — push out of trees, rocks, houses (circle collision in XZ)
   resolveObstacles();
 
-  // terrain collision
-  const ground = terrainHeight(player.pos.x, player.pos.z) + player.height;
+  // terrain collision (bridges count as walkable ground over the river)
+  const ground = groundHeightAt(player.pos.x, player.pos.z) + player.height;
   if (player.pos.y <= ground) {
     player.pos.y = ground; player.vel.y = 0; player.onGround = true;
   } else player.onGround = false;
@@ -1923,7 +1981,7 @@ function manageSpawns(dt) {
       }
       // predators & bandits must never lurk near a village — villagers are safe
       const PREDATORS = { wolf:1, boar:1, bandit:1, snake:1, scorpion:1 };
-      if (PREDATORS[t] && nearVillage(x, z, 85)) {
+      if (PREDATORS[t] && nearVillage(x, z, 250)) {             // keep predators 250m from towns
         t = desert ? 'rabbit' : (r < 0.5 ? 'deer' : 'rabbit');   // peaceful instead
       }
       if (t === 'bandit') spawnBanditGroup(x, z);   // raiders travel in bands
@@ -2792,6 +2850,7 @@ function removeNpcsOfChunk(key) {
   }
   for (let i = shops.length - 1; i >= 0; i--) if (shops[i].key === key) shops.splice(i, 1);
   for (let i = crops.length - 1; i >= 0; i--) if (crops[i].key === key) crops.splice(i, 1);
+  for (let i = bridges.length - 1; i >= 0; i--) if (bridges[i].key === key) bridges.splice(i, 1);
 }
 function npcSay(npc, line, dur = 3.6) {
   if (!npc.bubble) {
@@ -2856,7 +2915,7 @@ function updateNPCs(dt) {
       }
     }
     resolveNpcColliders(npc);                               // don't pass through houses
-    npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z) + 0.04;  // feet rest on ground (not sunk)
+    npc.mesh.position.y = groundHeightAt(npc.mesh.position.x, npc.mesh.position.z) + 0.04;  // on ground / on the bridge
     // character animation: walk / idle / talk gesture
     npc.walkT = (npc.walkT || 0) + dt * (moving ? 8 : 2);
     const legs = npc.mesh.userData.legs, arms = npc.mesh.userData.arms;
@@ -3279,7 +3338,7 @@ function backToMenu(){
 
 function clearChunks(){
   npcs.forEach(n => { if (n.bubble) n.bubble.remove(); });
-  npcs.length = 0; shops.length = 0; villages.length = 0; crops.length = 0;
+  npcs.length = 0; shops.length = 0; villages.length = 0; crops.length = 0; bridges.length = 0;
   chunks.forEach(c => chunkGroup.remove(c));
   chunks.clear();
 }
@@ -3304,6 +3363,20 @@ function loadState() {
 function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
 addEventListener('beforeunload', saveState);
 
+// find a pleasant green forest spot (not desert, not water, not a steep mountain)
+function findForestSpawn() {
+  for (let ring = 0; ring < 60; ring++) {
+    const d = ring * 24;
+    for (let k = 0; k < 8; k++) {
+      const a = (k / 8) * TAU + ring * 0.7;
+      const x = Math.cos(a) * d, z = Math.sin(a) * d;
+      const h = terrainHeight(x, z);
+      if (desertFactor(x, z) < 0.25 && h > WATER + 2 && h < 26 && terrainSlope(x, z) < 0.35
+          && !nearVillage(x, z, 40)) return { x, z };
+    }
+  }
+  return { x: 0, z: 0 };
+}
 function startGame(){
   initAudio();
   hide('menu'); show('loading');
@@ -3317,7 +3390,8 @@ function startGame(){
   player.wLevel = [0,0,0,0,0,0,0];
   inventory.length = 0;
   quest = null; renderQuestHUD();
-  player.pos.set(0, terrainHeight(0,0)+player.height+2, 0);
+  const spawn = findForestSpawn();   // always begin in green forest, never the desert
+  player.pos.set(spawn.x, terrainHeight(spawn.x, spawn.z)+player.height+2, spawn.z);
   player.vel.set(0,0,0); player.yaw=0; player.pitch=0;
   // restore a previous session (left via pause, not death)
   if (save) {
@@ -3386,14 +3460,16 @@ function maybeSpawnBear(dt){
   if (bearSpawned) return;
   bearTimer -= dt;
   if (bearTimer <= 0 || player.kills >= 8) {
-    bearSpawned = true;
-    // pick a spot well away from the player AND far from any village
-    let x, z, a, d = 120;
-    for (let tries = 0; tries < 16; tries++) {
-      a = rand(TAU); d = rand(150, 110);
+    // the bear must appear at least 500m from every village — only spawn once the
+    // player has roamed far enough into the wilderness; otherwise wait and retry
+    let x, z, a, found = false;
+    for (let tries = 0; tries < 20; tries++) {
+      a = rand(TAU); const d = rand(160, 110);
       x = player.pos.x + Math.cos(a)*d; z = player.pos.z + Math.sin(a)*d;
-      if (terrainHeight(x, z) > WATER + 1 && !nearVillage(x, z, 160)) break;
+      if (terrainHeight(x, z) > WATER + 1 && !nearVillage(x, z, 500)) { found = true; break; }
     }
+    if (!found) { bearTimer = 6; return; }   // too close to a town — check again shortly
+    bearSpawned = true;
     for (let i=0;i<10 && terrainHeight(x,z)<WATER+1;i++){ x+=10; z+=6; }
     spawnEnemy('bear', x, z);
     objectiveText('الدب الأسطوري (المستوى 100) ظهر! اهزمه — يتقلص كلما أصبته.');
@@ -3588,6 +3664,8 @@ if (location.hash.includes('debug')) {
     th: (x, z) => terrainHeight(x, z), hurt: (d) => hurtPlayer(d), attack: () => attack(),
     findOasis: () => { const t = _DBGfindDesert(); return t; },
     quality: (q) => applyQuality(q),
+    groundH: (x, z) => groundHeightAt(x, z), desertAt: (x, z) => desertFactor(x, z),
+    bridgeCount: () => bridges.length,
   };
   function _DBGfindDesert(){ for (let cx=-90; cx<90; cx++) for (let cz=-90; cz<90; cz++) { if (desertFactor(cx*CHUNK+CHUNK/2,cz*CHUNK+CHUNK/2)>0.5 && hash2(cx-333,cz+333)>0.78) return {x:cx*CHUNK+CHUNK/2, z:cz*CHUNK+CHUNK/2}; } return null; }
   function isDesert2(cx,cz){ return desertFactor(cx*CHUNK+CHUNK/2, cz*CHUNK+CHUNK/2) > 0.5; }
