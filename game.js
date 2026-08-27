@@ -373,6 +373,45 @@ applyWind(MAT.grass, 0.55);
 applyWind(MAT.pine, 0.012);
 applyWind(MAT.pineHi, 0.012);
 
+/* realistic stylized water — animated waves, fresnel sky reflection, sun glint */
+const waterUniforms = {
+  uTime: { value: 0 },
+  uSun:  { value: new THREE.Vector3(0.5, 0.7, 0.2).normalize() },
+  uSky:  { value: new THREE.Color(0x9fc6e0) },
+  uDeep: { value: new THREE.Color(0x0b3346) },
+  uShallow: { value: new THREE.Color(0x2f88a8) },
+};
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true, uniforms: waterUniforms,
+  vertexShader: `
+    uniform float uTime;
+    varying vec3 vN; varying vec3 vView; varying vec2 vUv; varying float vW;
+    void main(){
+      vUv = uv; vec3 p = position;
+      float w = sin(p.x*0.35 + uTime*1.3)*0.13 + cos(p.z*0.45 + uTime*1.1)*0.12 + sin((p.x+p.z)*0.22 + uTime*0.9)*0.07;
+      p.y += w; vW = w;
+      float dx = cos(p.x*0.35 + uTime*1.3)*0.13*0.35;
+      float dz = -sin(p.z*0.45 + uTime*1.1)*0.12*0.45;
+      vN = normalize(vec3(-dx, 1.0, -dz));
+      vec4 wp = modelMatrix * vec4(p, 1.0);
+      vView = normalize(cameraPosition - wp.xyz);
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }`,
+  fragmentShader: `
+    uniform vec3 uSun; uniform vec3 uSky; uniform vec3 uDeep; uniform vec3 uShallow; uniform float uTime;
+    varying vec3 vN; varying vec3 vView; varying vec2 vUv; varying float vW;
+    void main(){
+      float fres = pow(1.0 - max(dot(vN, vView), 0.0), 3.0);
+      vec3 col = mix(uDeep, uShallow, clamp(vW*3.0 + 0.5, 0.0, 1.0));
+      col = mix(col, uSky, fres * 0.7);
+      vec3 h = normalize(normalize(uSun) + vView);
+      col += vec3(1.0, 0.96, 0.82) * pow(max(dot(vN, h), 0.0), 140.0) * 1.3;   // sun glint
+      float sp = sin(vUv.x*90.0 + uTime*3.0) * sin(vUv.y*90.0 - uTime*2.0);
+      col += vec3(0.25) * smoothstep(0.92, 1.0, sp) * 0.4;                     // sparkle
+      gl_FragColor = vec4(col, 0.88);
+    }`,
+});
+
 /* ----------------------------------------------------------------------------
  * 3b. GLB model manager (houses, plants, animals)
  * -------------------------------------------------------------------------- */
@@ -383,8 +422,9 @@ const MODEL_CONF = {
   hen:      { span: 0.8 },
   fox:      { span: 1.5, anim: true },
   longhorn: { span: 2.4 },
-  // houses normalized by HEIGHT so every house towers well above the ~1.7m player
-  house1:{ height: 6.5 }, house2:{ height: 7 }, house3:{ height: 6 }, house4:{ height: 6 }, house5:{ height: 8 }, house6:{ height: 6.5 },
+  // houses: tall (by height) but footprint capped so they never overlap in the grid
+  house1:{ height: 6.5, maxSpan: 6 }, house2:{ height: 7, maxSpan: 6 }, house3:{ height: 6, maxSpan: 5.5 },
+  house4:{ height: 6, maxSpan: 5.5 }, house5:{ height: 8, maxSpan: 6.5 }, house6:{ height: 6.5, maxSpan: 6 },
   plants1:{ height: 1.6 }, plants2:{ height: 1.1 }, plants4:{ height: 1.0 },
   tomato:{ height: 1.4 }, waterplant:{ height: 0.6 }, monstera:{ height: 1.1 },
 };
@@ -395,16 +435,18 @@ function prepModel(key, gltf) {
   const conf = MODEL_CONF[key] || { span: 2 };
   const root = gltf.scene;
   _box.setFromObject(root); _box.getSize(_sz);
-  const s = conf.height ? conf.height / Math.max(1e-3, _sz.y)
-                        : conf.span / Math.max(1e-3, _sz.x, _sz.z);
+  let s = conf.height ? conf.height / Math.max(1e-3, _sz.y)
+                      : conf.span / Math.max(1e-3, _sz.x, _sz.z);
+  // cap horizontal footprint (keeps tall houses from becoming too wide → no overlap)
+  if (conf.maxSpan) s = Math.min(s, conf.maxSpan / Math.max(1e-3, _sz.x, _sz.z));
   root.scale.setScalar(s);
   root.updateMatrixWorld(true);
-  _box.setFromObject(root); _box.getCenter(_ctr);
+  _box.setFromObject(root); _box.getCenter(_ctr); _box.getSize(_sz);
   root.position.x -= _ctr.x; root.position.z -= _ctr.z; root.position.y -= _box.min.y;
   let skinned = false;
   root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } if (o.isSkinnedMesh) skinned = true; });
   const wrap = new THREE.Group(); wrap.add(root);
-  MODELS[key] = { proto: wrap, anims: gltf.animations || [], skinned };
+  MODELS[key] = { proto: wrap, anims: gltf.animations || [], skinned, footprint: Math.max(_sz.x, _sz.z) };
 }
 function loadModel(key) {
   return new Promise(res => {
@@ -634,13 +676,9 @@ function buildScatter(cx, cz, group) {
     terrainHeight(ox+CHUNK/2, oz+CHUNK/2),
   ].some(h => h < WATER - 0.3);
   if (cornersLow) {
-    const wGeo = new THREE.PlaneGeometry(CHUNK, CHUNK);
+    const wGeo = new THREE.PlaneGeometry(CHUNK, CHUNK, 20, 20);
     wGeo.rotateX(-Math.PI/2);
-    const wMat = new THREE.MeshStandardMaterial({
-      color: 0x2b6b8a, transparent: true, opacity: 0.78,
-      roughness: 0.15, metalness: 0.2,
-    });
-    const water = new THREE.Mesh(wGeo, wMat);
+    const water = new THREE.Mesh(wGeo, waterMat);   // shared animated water shader
     water.position.set(ox + CHUNK/2, WATER, oz + CHUNK/2);
     water.userData.isWater = true;
     group.add(water);
@@ -704,35 +742,41 @@ const SHOP_TYPES = [
 function buildVillage(cx, cz, group, colliders) {
   const r = rng((cx | 0) * 40503 ^ (cz | 0) * 1299721);
   const key = group.userData.key;
-  const COLS = 7, ROWS = 7, CELL = 8.6;                 // 7×7 grid, wide alleys for tall houses
+  const COLS = 7, ROWS = 7, CELL = 8.8;                 // neat grid; col/row 3 are roads
   const half = (COLS - 1) * CELL / 2;
-  const plaza = { c0: 3, c1: 3, r0: 3, r1: 3 };          // central plaza cell
+  const ROAD = 3;                                        // central cross = main roads + plaza
   let shopBudget = 6;
   const wallMats = [MAT.wall, MAT.wall2];
+  // dirt roads (a cross through the middle) + plaza patch
+  const roadMat = MAT.dirt;
+  const roadH = new THREE.Mesh(new THREE.PlaneGeometry(COLS * CELL, CELL * 0.9), roadMat);
+  roadH.rotation.x = -Math.PI/2; roadH.position.set(cx, terrainHeight(cx, cz) + 0.04, cz); group.add(roadH);
+  const roadV = new THREE.Mesh(new THREE.PlaneGeometry(CELL * 0.9, ROWS * CELL), roadMat);
+  roadV.rotation.x = -Math.PI/2; roadV.position.set(cx, terrainHeight(cx, cz) + 0.04, cz); group.add(roadV);
+
   for (let ci = 0; ci < COLS; ci++) {
     for (let ri = 0; ri < ROWS; ri++) {
-      const x = cx + (ci * CELL - half) + rand(0.6, -0.6);
-      const z = cz + (ri * CELL - half) + rand(0.6, -0.6);
-      const h = terrainHeight(x, z);
-      if (h < WATER + 1 || terrainSlope(x, z) > 0.45) continue;
-      const inPlaza = ci >= plaza.c0 && ci <= plaza.c1 && ri >= plaza.r0 && ri <= plaza.r1;
-      if (inPlaza) continue;                              // leave plaza open
-      // some edge plots become shops
+      if (ci === ROAD || ri === ROAD) continue;           // keep the central cross clear (roads + plaza)
+      const x = cx + (ci * CELL - half);                  // aligned, no jitter
+      const z = cz + (ri * CELL - half);
+      if (terrainHeight(x, z) < WATER + 1 || terrainSlope(x, z) > 0.4) continue;
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
-      const makeShop = shopBudget > 0 && edge && r() < 0.28;
-      const w = 5 + r() * 1.8, d = 5 + r() * 1.8, wallH = 4.2 + r() * 1.4;   // tall houses (> 2× player)
-      // mostly GLB house models; ~28% procedural low-poly houses for extra variety
-      const glb = r() < 0.72 ? instModel(HOUSE_KEYS[Math.floor(r() * HOUSE_KEYS.length)]) : null;
-      const house = glb || makeHouse(r, w, d, wallH, wallMats[(ci + ri) & 1]);
-      house.rotation.y = Math.atan2(cx - x, cz - z) + (r() < 0.5 ? 0 : Math.PI);
-      house.position.set(x, h, z);
+      const makeShop = shopBudget > 0 && edge && r() < 0.3;
+      // pick a house model → get its footprint so it never overlaps / sinks
+      let house = null, fp = 0;
+      if (r() < 0.72) { const k = HOUSE_KEYS[Math.floor(r()*HOUSE_KEYS.length)]; house = instModel(k); if (house) fp = MODELS[k].footprint; }
+      if (!house) { const w = 5 + r()*1.4, d = 5 + r()*1.4, wallH = 4.4 + r()*1.2; house = makeHouse(r, w, d, wallH, wallMats[(ci+ri)&1]); fp = Math.max(w, d); }
+      // sit on the highest footprint corner so it never sinks into the ground
+      const hh = fp / 2;
+      const gy = Math.max(terrainHeight(x-hh,z-hh), terrainHeight(x+hh,z-hh), terrainHeight(x-hh,z+hh), terrainHeight(x+hh,z+hh), terrainHeight(x,z));
+      house.rotation.y = Math.atan2(cx - x, cz - z);      // face the town centre / road
+      house.position.set(x, gy, z);
       group.add(house);
-      const cr = glb ? 3.2 : Math.max(w, d) * 0.62;
-      colliders.push({ x, z, r: cr });
+      colliders.push({ x, z, r: fp * 0.55 });             // solid — cannot be entered
       if (makeShop) {
         shopBudget--;
         const st = SHOP_TYPES[shopBudget % SHOP_TYPES.length];
-        const sign = makeSign(st.sign); sign.scale.set(4, 1.9, 1); sign.position.set(0, (glb ? 5.6 : wallH + 2), 0);
+        const sign = makeSign(st.sign); sign.scale.set(4, 1.9, 1); sign.position.set(0, 5.6, 0);
         house.add(sign);
         shops.push({ x, z, type: st.type, name: st.name, key });
       }
@@ -779,18 +823,31 @@ function makePalm() {
 function buildOasis(cx, cz, group, colliders) {
   const r = rng(((cx*15485863) ^ (cz*32452843)) >>> 0);
   const hc = terrainHeight(cx, cz);
-  const rad = 8 + r() * 4;
-  // water disc
-  const pond = new THREE.Mesh(new THREE.CircleGeometry(rad, 24),
-    new THREE.MeshStandardMaterial({ color: 0x2f7f9a, transparent: true, opacity: 0.82, roughness: 0.1, metalness: 0.2 }));
-  pond.rotation.x = -Math.PI / 2; pond.position.set(cx, hc - 0.35, cz);
+  const rad = 10 + r() * 5;
+  // animated water disc (shared water shader)
+  const pGeo = new THREE.CircleGeometry(rad, 48); pGeo.rotateX(-Math.PI/2);
+  const pond = new THREE.Mesh(pGeo, waterMat);
+  pond.position.set(cx, hc - 0.3, cz); pond.userData.isWater = true;
   group.add(pond);
   group.userData.oasis = { x: cx, z: cz, r: rad };
   // damp sand ring
-  const ring = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 2.5, 24),
+  const ring = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 3, 40),
     new THREE.MeshLambertMaterial({ color: 0x8a6a3a }));
-  ring.rotation.x = -Math.PI / 2; ring.position.set(cx, hc - 0.05, cz);
+  ring.rotation.x = -Math.PI / 2; ring.position.set(cx, hc - 0.02, cz);
   group.add(ring);
+  // reeds/cattails around the shoreline
+  const reedGeo = new THREE.CylinderGeometry(0.03, 0.05, 1.4, 4); reedGeo.translate(0, 0.7, 0);
+  const reedMat = new THREE.MeshLambertMaterial({ color: 0x4f7a35 });
+  const nR = 30;
+  const reedIM = new THREE.InstancedMesh(reedGeo, reedMat, nR);
+  let rc = 0; const _rm = new THREE.Matrix4(), _rq = new THREE.Quaternion(), _rv = new THREE.Vector3(), _rs = new THREE.Vector3(1,1,1);
+  for (let i = 0; i < nR; i++) {
+    const a = r() * TAU, d = rad + 0.3 + r() * 1.6;
+    const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+    _rm.compose(_rv.set(x, terrainHeight(x, z), z), _rq.setFromAxisAngle(_rv.set(0,1,0), r()*TAU), _rs);
+    reedIM.setMatrixAt(rc++, _rm);
+  }
+  reedIM.count = rc; reedIM.instanceMatrix.needsUpdate = true; reedIM.castShadow = true; group.add(reedIM);
   // palms + shrubs around the shoreline
   const nP = 5 + Math.floor(r() * 4);
   for (let i = 0; i < nP; i++) {
@@ -1032,7 +1089,7 @@ function updatePlayer(dt) {
   if (mounted && mounted.alive) {
     const gy = terrainHeight(player.pos.x, player.pos.z);
     mounted.mesh.position.set(player.pos.x, gy, player.pos.z);
-    mounted.mesh.rotation.y = player.yaw;
+    mounted.mesh.rotation.y = Math.atan2(-Math.sin(player.yaw), -Math.cos(player.yaw)) + (mounted.faceOff || -Math.PI/2);
     const spd = Math.hypot(player.vel.x, player.vel.z);
     walkAnim(mounted, spd, dt);
   } else if (mounted && !mounted.alive) {
@@ -1497,8 +1554,12 @@ function spawnEnemy(type, x, z) {
   mesh.position.set(x, h, z);
   mesh.rotation.y = rand(TAU);
   scene.add(mesh);
+  // forward-axis offset so the model faces its travel direction (walks straight)
+  //   procedural models face +X → -90°; GLB animals tuned below
+  const GLB_FACE = { fox: Math.PI, chicken: -Math.PI/2, cow: Math.PI };
+  const faceOff = (type in GLB_FACE) ? GLB_FACE[type] : -Math.PI/2;
   const e = {
-    type, mesh, hp, hpMax: hp, dmg, speed, radius, aggro, xp, name,
+    type, mesh, hp, hpMax: hp, dmg, speed, radius, aggro, xp, name, faceOff,
     flees, hostile, rideable,
     alive: true, state: 'idle', vel: new THREE.Vector3(),
     wanderT: rand(3), wanderDir: rand(TAU), hitFlash: 0, attackCd: 0,
@@ -1508,6 +1569,24 @@ function spawnEnemy(type, x, z) {
   if (type === 'bear') { bear = e; e.aggro = true; showBossBar(); }
   return e;
 }
+
+// bandits roam the roads in organized bands of 2–4 (never lone wolves)
+function spawnBanditGroup(x, z) {
+  const n = 2 + Math.floor(Math.random() * 3);   // 2, 3 or 4
+  const gid = 'b' + (banditGroupId++);
+  let spawned = 0;
+  for (let i = 0; i < n; i++) {
+    const bx = x + rand(4, -4), bz = z + rand(4, -4);
+    const h = terrainHeight(bx, bz);
+    if (h <= WATER + 1 || h >= 40) continue;
+    const e = spawnEnemy('bandit', bx, bz);
+    e.group = gid;            // band members share fate: leash together
+    spawned++;
+  }
+  return spawned;
+}
+let banditGroupId = 0;
+const banditAlarm = {};   // gid → whether the band is currently engaged
 
 function damageEnemy(e, dmg, dir, knock) {
   e.hp -= dmg;
@@ -1576,54 +1655,47 @@ function updateEnemies(dt) {
       e.soundT = rand(15, 6);
     }
 
-    let move = _s.set(0,0,0);
+    let move = _s.set(0,0,0), faceTarget = null;
+    const wander = (spd, lo, hi) => {
+      e.wanderT -= dt;
+      if (e.wanderT <= 0) { e.wanderT = rand(hi, lo); e.wanderDir = rand(TAU); e.pause = rand() < 0.35; }
+      if (!e.pause) { move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir)); e.speedCur = spd; }
+      else e.speedCur = 0;
+    };
     // behaviour
-    if (e.flees) {
-      if (dist < 14 || e.state === 'flee') { // flee
-        move.set(-dirToPlayer.x, 0, -dirToPlayer.z);
-        e.speedCur = e.speed;
-      } else { // wander
-        e.wanderT -= dt;
-        if (e.wanderT <= 0) { e.wanderT = rand(4,2); e.wanderDir = rand(TAU); }
-        move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
-        e.speedCur = 2;
-      }
-    } else if (!e.hostile) { // calm animals (horse) — gentle wander, bolt if attacked
-      if (e.state === 'flee' && dist < 22) {
-        move.set(-dirToPlayer.x, 0, -dirToPlayer.z); e.speedCur = e.speed;
-      } else {
-        e.wanderT -= dt;
-        if (e.wanderT <= 0) { e.wanderT = rand(6,3); e.wanderDir = rand(TAU); }
-        move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
-        e.speedCur = 1.6;
-      }
-    } else { // wolf / boar / bear / snake / scorpion
-      const notice = e.radius < 0.8 ? 13 : 40;   // small predators notice up close
-      if (dist < notice || e.aggro) {
-        e.aggro = true;
-        if (dist > (e.radius + 1.6)) {       // chase
-          move.copy(dirToPlayer); e.speedCur = e.speed;
-        } else {                              // attack
-          e.speedCur = 0;
-          e.mesh.rotation.y = Math.atan2(dirToPlayer.x, dirToPlayer.z);   // face target
+    if (e.flees) {                                   // deer / rabbit / chicken
+      if (dist < 15) e.state = 'flee';
+      else if (dist > 28) e.state = 'idle';
+      if (e.state === 'flee') { move.set(-dirToPlayer.x, 0, -dirToPlayer.z); e.speedCur = e.speed; }
+      else wander(1.8, 2, 4);
+    } else if (!e.hostile) {                          // calm: horse / cow / cat / dog
+      if (e.state === 'flee' && dist < 18) { move.set(-dirToPlayer.x, 0, -dirToPlayer.z); e.speedCur = e.speed; }
+      else { if (e.state === 'flee') e.state = 'idle'; wander(1.5, 3, 6); }
+    } else {                                          // hostile: wolf/boar/bear/snake/scorpion/bandit/fox
+      const notice = e.radius < 0.8 ? 14 : 34;
+      const leash = e.type === 'bear' ? 90 : 48;      // give up when the player gets far
+      if (e.aggro && dist > leash) { e.aggro = false; e.state = 'idle'; if (e.group) delete banditAlarm[e.group]; }
+      // a band raids together: if one member spots the player, the whole band joins
+      if (dist < notice) { e.aggro = true; if (e.group) banditAlarm[e.group] = true; }
+      else if (e.group && banditAlarm[e.group] && dist < leash) e.aggro = true;
+      if (e.aggro) {
+        if (dist > e.radius + 1.9) { move.copy(dirToPlayer); e.speedCur = e.speed; }
+        else {                                        // in range → attack
+          e.speedCur = 0; faceTarget = Math.atan2(dirToPlayer.x, dirToPlayer.z) + e.faceOff;
           if (e.attackCd <= 0 && (e.atkT || 0) <= 0) { e.atkT = 0.4; e.atkHit = false; e.attackCd = e.type==='bear'?1.4:1.0; critterSound(e.type, 0.14); }
         }
-      } else { // idle wander
-        e.wanderT -= dt;
-        if (e.wanderT <= 0) { e.wanderT = rand(5,3); e.wanderDir = rand(TAU); }
-        move.set(Math.cos(e.wanderDir), 0, Math.sin(e.wanderDir));
-        e.speedCur = 1.5;
-      }
+      } else wander(1.5, 3, 5);
     }
 
-    // integrate
+    // integrate — move, then smoothly turn to face travel/target (walk straight)
     if (move.lengthSq() > 0) {
       move.normalize();
       e.mesh.position.x += move.x * e.speedCur * dt;
       e.mesh.position.z += move.z * e.speedCur * dt;
-      e.mesh.rotation.y = Math.atan2(move.x, move.z);
+      faceTarget = Math.atan2(move.x, move.z) + e.faceOff;
     }
-    // stick to ground
+    if (faceTarget !== null) turnTo(e.mesh, faceTarget, dt, 9);
+    // stick to ground (feet on terrain)
     e.mesh.position.y = terrainHeight(e.mesh.position.x, e.mesh.position.z);
 
     // hit-flash tint (only this enemy's cloned material)
@@ -1641,9 +1713,9 @@ function updateEnemies(dt) {
       e.mesh.position.z += dirToPlayer.z * lunge * 3.5 * dt;
       const head = e.mesh.userData.head;
       if (head) head.rotation.z = -lunge * 0.7;          // snap head/jaw forward
-      else e.mesh.rotation.x = lunge * 0.25;             // GLB: tip the whole body
+      else e.mesh.rotation.x = lunge * 0.22;             // GLB: tip the whole body
       if (p > 0.45 && !e.atkHit && dist < e.radius + 2.4) { hurtPlayer(e.dmg); e.atkHit = true; }
-    } else if (e.mesh.userData.head) { e.mesh.userData.head.rotation.z = 0; }
+    } else { if (e.mesh.userData.head) e.mesh.userData.head.rotation.z = 0; else e.mesh.rotation.x = 0; }
 
     // cull far dead-simple: despawn very far non-boss
     if (e.type !== 'bear' && dist > CHUNK * (VIEW + 2)) { scene.remove(e.mesh); enemies.splice(i,1); }
@@ -1652,6 +1724,13 @@ function updateEnemies(dt) {
 
 function lungeEnemy(e, dir) {
   e.mesh.position.addScaledVector(dir, 0.4);
+}
+// smoothly rotate a mesh's yaw toward a target angle (shortest path)
+function turnTo(mesh, target, dt, rate) {
+  let d = target - mesh.rotation.y;
+  while (d > Math.PI) d -= TAU;
+  while (d < -Math.PI) d += TAU;
+  mesh.rotation.y += d * Math.min(1, dt * rate);
 }
 function walkAnim(e, speed, dt) {
   e.walkT = (e.walkT || 0) + dt * speed * 1.4;
@@ -1704,7 +1783,8 @@ function manageSpawns(dt) {
         else if (r < 0.95) t = 'bandit';                                         // roadside bandits
         else t = mounts < 3 ? 'horse' : 'deer';                                  // keep horses around
       }
-      spawnEnemy(t, x, z);
+      if (t === 'bandit') spawnBanditGroup(x, z);   // raiders travel in bands
+      else spawnEnemy(t, x, z);
     }
   }
 }
@@ -2065,9 +2145,14 @@ Object.assign(ITEMS, {
 let currentShop = null;
 function tryShop() {
   if (state !== 'play') return;
+  // choose whichever is actually closer — a shop counter or a person —
+  // so villagers standing by a stall are still reachable to talk to
   const s = nearestShop();
-  if (s) { openShop(s); return; }
   const npc = nearestNPC();
+  const sd = s ? Math.hypot(s.x - player.pos.x, s.z - player.pos.z) : Infinity;
+  const nd = npc ? Math.hypot(npc.mesh.position.x - player.pos.x, npc.mesh.position.z - player.pos.z) : Infinity;
+  if (npc && nd <= sd) { talkTo(npc); return; }
+  if (s) { openShop(s); return; }
   if (npc) talkTo(npc);
 }
 function openShop(shop) { currentShop = shop; state = 'shop'; document.exitPointerLock?.(); renderShop(); show('shop'); }
@@ -2130,7 +2215,7 @@ $('shop-close') && ($('shop-close').onclick = closeShop);
  * 9d-2. Talk to townsfolk (interactive dialogue)
  * -------------------------------------------------------------------------- */
 function nearestNPC() {
-  let best = null, bd = 3.5;
+  let best = null, bd = 4.5;
   for (const n of npcs) {
     const d = Math.hypot(n.mesh.position.x - player.pos.x, n.mesh.position.z - player.pos.z);
     if (d < bd) { bd = d; best = n; }
@@ -2351,7 +2436,7 @@ function updateRain(dt) {
 /* ----------------------------------------------------------------------------
  * 9f. Day / night cycle
  * -------------------------------------------------------------------------- */
-const DAY_LEN = 200;          // seconds for a full day↔night cycle
+const DAY_LEN = 620;          // full day↔night cycle (long day, short night — see warp below)
 let timeOfDay = 0.15;         // 0=dawn, .25=noon, .5=dusk, .75=midnight
 const _sunDir = new THREE.Vector3();
 // palette anchors
@@ -2361,7 +2446,12 @@ const DUSK_TOP = new THREE.Color(0x5a4a6a), DUSK_BOT = new THREE.Color(0xe8895a)
 const _tmpTop = new THREE.Color(), _tmpBot = new THREE.Color(), _fogC = new THREE.Color();
 function updateDayNight(dt) {
   timeOfDay = (timeOfDay + dt / DAY_LEN) % 1;
-  const ang = timeOfDay * TAU;                 // sun orbit
+  // warp the cycle so DAY fills ~78% of it (long day, short night)
+  const DAY_FRAC = 0.78;
+  const phase = timeOfDay < DAY_FRAC
+    ? (timeOfDay / DAY_FRAC) * 0.5                       // dawn → noon → dusk
+    : 0.5 + ((timeOfDay - DAY_FRAC) / (1 - DAY_FRAC)) * 0.5;  // dusk → midnight → dawn
+  const ang = phase * TAU;                     // sun orbit
   _sunDir.set(Math.cos(ang) * 0.5, Math.sin(ang), 0.32).normalize();
   sun.position.set(player.pos.x + _sunDir.x * 140, _sunDir.y * 150 + 12, player.pos.z + _sunDir.z * 140);
   sun.target.position.set(player.pos.x, 0, player.pos.z);
@@ -2378,6 +2468,8 @@ function updateDayNight(dt) {
   skyMat.uniforms.bottom.value.copy(_tmpBot);
   skyMat.uniforms.night.value = night;
   scene.background.copy(_tmpTop);
+  waterUniforms.uSun.value.copy(_sunDir);
+  waterUniforms.uSky.value.copy(_tmpTop);
   // fog tracks the sky bottom (dimmer at night), tinted by weather a touch
   _fogC.copy(_tmpBot).multiplyScalar(lerp(0.7, 1, day));
   scene.fog.color.copy(_fogC);
@@ -2391,8 +2483,8 @@ function updateDayNight(dt) {
   stars.material.opacity = night;
   stars.position.copy(player.pos);
 
-  // HUD clock
-  const hr = Math.floor(((timeOfDay + 0.25) % 1) * 24);
+  // HUD clock (from the warped phase: phase 0 ≈ 06:00)
+  const hr = Math.floor((phase * 24 + 6) % 24);
   const icon = day > 0.35 ? '☀️' : night > 0.5 ? '🌙' : '🌆';
   const el = document.getElementById('w-time');
   if (el) el.textContent = `${icon} ${String(hr).padStart(2,'0')}:00`;
@@ -2476,21 +2568,18 @@ function updateInsects(dt) {
  * -------------------------------------------------------------------------- */
 const npcs = [];
 const NPC_NAMES = ['أبو يوسف', 'سالم', 'مريم', 'خالد', 'فاطمة', 'إدريس', 'العربي', 'زينب'];
-const NPC_LINES = [
-  'السلام عليكم يا جاري.',
-  'وعليكم السلام، كيف حالك اليوم؟',
-  'الحمد لله، الحصاد كان وفيراً هذا العام.',
-  'احذر، رأيت ذئاباً قرب النهر البارحة.',
-  'هل سمعت عن الدب الأسطوري في أعماق الغابة؟',
-  'يقولون إن من يهزمه ينال كنزاً عظيماً.',
-  'التاجر جلب أسلحة جديدة، مرّ عليه.',
-  'الطقس متقلب، قد تمطر الليلة.',
-  'الأطفال ذهبوا لصيد السمك في البحيرة.',
-  'لا تقترب من الصحراء وحدك، هناك عقارب.',
-  'ليلة أمس كانت باردة، الثلج قادم.',
-  'بارك الله في يومك يا صديقي.',
-  'اشترِ حصاناً، يسهّل التنقل كثيراً.',
-  'الغابة تخفي أسراراً كثيرة.',
+// coherent two-line exchanges: [initiator, responder]
+const NPC_CONVOS = [
+  ['السلام عليكم يا جاري.', 'وعليكم السلام، كيف حالك اليوم؟'],
+  ['كيف كان الحصاد هذا العام؟', 'الحمد لله، كان وفيراً بفضل المطر.'],
+  ['احذر، رأيت ذئاباً قرب النهر البارحة.', 'شكراً لتحذيرك، سأبقى قرب القرية.'],
+  ['هل سمعت عن الدب الأسطوري؟', 'نعم، يقولون إن من يهزمه ينال كنزاً عظيماً.'],
+  ['التاجر جلب أسلحةً جديدة.', 'حقاً؟ سأمرّ على الحدّاد إذن.'],
+  ['الطقس متقلب اليوم.', 'أجل، قد تمطر الليلة، خذ حذرك.'],
+  ['أين ذهب الأطفال؟', 'ذهبوا لصيد السمك في البحيرة.'],
+  ['لا تقترب من الصحراء وحدك.', 'لماذا؟ ما الخطر هناك؟'],
+  ['هناك عقارب وقطّاع طرق شرقاً.', 'سأتجنّبها، بارك الله فيك.'],
+  ['اشترِ حصاناً، يسهّل التنقل.', 'فكرة جيدة، سأوفّر بعض الذهب.'],
 ];
 // two base "characters" (male/female-ish silhouettes), each cloned with varied clothes
 function makeNPC(rr = Math.random) {
@@ -2536,7 +2625,7 @@ function spawnTownNPCs(cx, cz, group, key, r) {
     group.add(mesh);
     npcs.push({ mesh, key, name: NPC_NAMES[Math.floor(r()*NPC_NAMES.length)],
                 homeX: x, homeZ: z, talkT: rand(12, 2), sayUntil: 0, bubble: null,
-                wanderT: rand(4), wanderDir: rand(TAU), walkT: 0 });
+                wanderT: rand(4), wanderDir: rand(TAU), walkT: 0, pendingReply: null });
   }
 }
 function removeNpcsOfChunk(key) {
@@ -2576,7 +2665,7 @@ function updateNPCs(dt) {
         moving = true;
       }
     }
-    npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z);
+    npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z) + 0.04;  // feet rest on ground (not sunk)
     // character animation: walk / idle / talk gesture
     npc.walkT = (npc.walkT || 0) + dt * (moving ? 8 : 2);
     const legs = npc.mesh.userData.legs, arms = npc.mesh.userData.arms;
@@ -2592,21 +2681,32 @@ function updateNPCs(dt) {
       arms[1].rotation.x = -Math.sin(npc.walkT * 0.5) * 0.05;
     }
 
-    // conversation: speak on a timer, prompt a nearby neighbour to reply
+    // conversation: coherent two-line exchanges, and only when the player is
+    // near enough to hear (idle villages stay quiet, so it never feels random)
     npc.talkT -= dt;
-    if (npc.talkT <= 0) {
-      npc.talkT = rand(14, 7);
-      npcSay(npc, NPC_LINES[Math.floor(rand(NPC_LINES.length))]);
-      // face and cue nearest neighbour to reply
-      let other = null, bd = 8;
-      for (const o of npcs) {
-        if (o === npc || o.key !== npc.key) continue;
-        const d = Math.hypot(o.mesh.position.x - npc.mesh.position.x, o.mesh.position.z - npc.mesh.position.z);
-        if (d < bd) { bd = d; other = o; }
-      }
-      if (other) {
-        npc.mesh.lookAt(other.mesh.position.x, npc.mesh.position.y + 1.6, other.mesh.position.z);
-        other.talkT = 2.2;   // replies shortly
+    if (npc.talkT <= 0 && far < 30) {
+      if (npc.pendingReply) {
+        // this NPC was cued to answer its neighbour — say the matching reply
+        npcSay(npc, npc.pendingReply);
+        npc.pendingReply = null;
+        npc.talkT = rand(16, 9);
+      } else {
+        // start a fresh exchange: pick a coherent pair, cue a neighbour to reply
+        const cv = NPC_CONVOS[Math.floor(rand(NPC_CONVOS.length))];
+        npcSay(npc, cv[0]);
+        npc.talkT = rand(18, 11);
+        let other = null, bd = 9;
+        for (const o of npcs) {
+          if (o === npc || o.key !== npc.key || elapsed < o.sayUntil) continue;
+          const d = Math.hypot(o.mesh.position.x - npc.mesh.position.x, o.mesh.position.z - npc.mesh.position.z);
+          if (d < bd) { bd = d; other = o; }
+        }
+        if (other) {
+          npc.mesh.lookAt(other.mesh.position.x, npc.mesh.position.y + 1.6, other.mesh.position.z);
+          other.mesh.lookAt(npc.mesh.position.x, other.mesh.position.y + 1.6, npc.mesh.position.z);
+          other.pendingReply = cv[1];
+          other.talkT = rand(2.6, 1.4);   // replies shortly after
+        }
       }
     }
 
@@ -2678,6 +2778,7 @@ function gainXP(x) {
 }
 function diePlayer() {
   player.alive = false;
+  clearSave();   // death wipes the save — fresh start next time
   document.exitPointerLock?.();
   state = 'dead';
   document.getElementById('death-stats').textContent =
@@ -2822,24 +2923,57 @@ function noiseBurst(dur, vol, cut) {
   const g = audioCtx.createGain(); g.gain.setValueAtTime(vol * masterVol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   src.connect(flt); flt.connect(g); g.connect(audioCtx.destination); src.start(t); src.stop(t + dur);
 }
-// distinct procedural sound per animal
+// a warmer animal "call": a body tone through a lowpass with vibrato + a
+// harmonic overtone, so cries read as organic rather than as bare beeps
+function animalCall(f0, toF, dur, vol, wave = 'sawtooth', vibHz = 6, vibDepth = 0.04, cutoff = 2600) {
+  if (!audioOn || masterVol <= 0 || !audioCtx) return;
+  const t = audioCtx.currentTime, V = vol * masterVol;
+  const o = audioCtx.createOscillator(), o2 = audioCtx.createOscillator();
+  const g = audioCtx.createGain(), flt = audioCtx.createBiquadFilter();
+  const vib = audioCtx.createOscillator(), vibG = audioCtx.createGain();
+  o.type = wave; o2.type = wave;
+  o.frequency.setValueAtTime(f0, t); o2.frequency.setValueAtTime(f0 * 2.01, t);
+  if (toF) { o.frequency.exponentialRampToValueAtTime(Math.max(20, toF), t + dur);
+             o2.frequency.exponentialRampToValueAtTime(Math.max(20, toF * 2.01), t + dur); }
+  // vibrato modulates both oscillators for a living, breathing tone
+  vib.frequency.value = vibHz; vibG.gain.value = f0 * vibDepth;
+  vib.connect(vibG); vibG.connect(o.frequency); vibG.connect(o2.frequency);
+  flt.type = 'lowpass'; flt.frequency.value = cutoff;
+  const o2g = audioCtx.createGain(); o2g.gain.value = 0.35;   // overtone quieter
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(V, t + Math.min(0.05, dur * 0.2));   // soft attack
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); o2.connect(o2g); o2g.connect(g); g.connect(flt); flt.connect(audioCtx.destination);
+  o.start(t); o2.start(t); vib.start(t);
+  o.stop(t + dur + 0.02); o2.stop(t + dur + 0.02); vib.stop(t + dur + 0.02);
+}
+// distinct procedural sound per animal — layered for a more natural feel
 function critterSound(type, vol = 0.12) {
   if (!audioOn || !audioCtx) return;
   switch (type) {
-    case 'wolf':    blip(300, 'sine', 0.8, vol, 620); break;                    // howl
-    case 'dog':     blip(240, 'square', 0.09, vol, 180); setTimeout(()=>blip(220,'square',0.09,vol,170),110); break;
-    case 'cat':     blip(560, 'sine', 0.35, vol, 760); break;                   // meow
-    case 'chicken': blip(420, 'square', 0.06, vol, 500); setTimeout(()=>blip(360,'square',0.08,vol,300),90); break;
-    case 'boar':    blip(130, 'sawtooth', 0.18, vol, 90); break;                // grunt
-    case 'bear':    blip(85, 'sawtooth', 0.9, vol*1.4, 60); break;             // roar
-    case 'deer':    blip(320, 'triangle', 0.25, vol*0.8, 260); break;
-    case 'snake':   noiseBurst(0.5, vol*0.5, 5000); break;                      // hiss
-    case 'scorpion':blip(900, 'square', 0.04, vol*0.6); break;                  // click
-    case 'horse':   blip(320, 'sawtooth', 0.5, vol, 150); break;               // neigh
-    case 'camel':   blip(150, 'sawtooth', 0.6, vol, 100); break;               // groan
-    case 'rabbit':  blip(700, 'sine', 0.05, vol*0.5); break;
-    case 'fox':     blip(650, 'sawtooth', 0.14, vol, 1100); setTimeout(()=>blip(720,'sawtooth',0.12,vol,900),150); break; // yip
-    case 'cow':     blip(190, 'sine', 0.7, vol, 120); break;                    // moo
+    case 'wolf':    animalCall(300, 640, 0.9, vol, 'sawtooth', 5, 0.05, 1800);   // rising howl
+                    setTimeout(()=>animalCall(560, 380, 0.5, vol*0.7, 'sawtooth', 5, 0.05, 1600), 800); break;
+    case 'dog':     animalCall(250, 200, 0.1, vol, 'square', 0, 0, 1400);        // woof-woof
+                    setTimeout(()=>animalCall(230, 180, 0.1, vol, 'square', 0, 0, 1300), 150); break;
+    case 'cat':     animalCall(540, 780, 0.22, vol, 'sawtooth', 7, 0.06, 2400);  // me-ow
+                    setTimeout(()=>animalCall(760, 460, 0.28, vol, 'sawtooth', 7, 0.06, 2200), 200); break;
+    case 'chicken': animalCall(430, 520, 0.07, vol, 'square', 0, 0, 3000);       // cluck-cluck
+                    setTimeout(()=>animalCall(360, 300, 0.09, vol, 'square', 0, 0, 2600), 110);
+                    setTimeout(()=>animalCall(320, 260, 0.11, vol, 'square', 0, 0, 2400), 240); break;
+    case 'boar':    animalCall(140, 90, 0.16, vol, 'sawtooth', 12, 0.08, 900);   // grunt
+                    setTimeout(()=>animalCall(120, 80, 0.14, vol, 'sawtooth', 12, 0.08, 900), 180); break;
+    case 'bear':    animalCall(90, 62, 0.95, vol*1.4, 'sawtooth', 4, 0.03, 700);  // deep roar
+                    noiseBurst(0.6, vol*0.5, 500); break;
+    case 'deer':    animalCall(300, 240, 0.3, vol*0.8, 'triangle', 5, 0.04, 1800); break;  // bleat
+    case 'snake':   noiseBurst(0.55, vol*0.55, 5200); break;                     // hiss
+    case 'scorpion':blip(950, 'square', 0.035, vol*0.6); setTimeout(()=>blip(880,'square',0.03,vol*0.5),60); break; // clicks
+    case 'horse':   animalCall(340, 150, 0.5, vol, 'sawtooth', 9, 0.09, 1500);   // whinny
+                    noiseBurst(0.25, vol*0.3, 1200); break;
+    case 'camel':   animalCall(150, 95, 0.65, vol, 'sawtooth', 6, 0.09, 700); break; // groan
+    case 'rabbit':  animalCall(720, 900, 0.05, vol*0.5, 'sine', 0, 0, 3000); break;  // squeak
+    case 'fox':     animalCall(640, 1150, 0.13, vol, 'sawtooth', 8, 0.06, 3000);  // yip
+                    setTimeout(()=>animalCall(720, 900, 0.12, vol, 'sawtooth', 8, 0.06, 2800), 160); break;
+    case 'cow':     animalCall(200, 120, 0.75, vol, 'sine', 4, 0.05, 900); break;    // moo
     default: break;
   }
 }
@@ -2895,7 +3029,7 @@ let bgAngle = 0;
  * 16. Game state machine + UI wiring
  * -------------------------------------------------------------------------- */
 let state = 'menu';    // menu | loading | play | pause | dead
-let elapsed = 0, walkPhase = 0;
+let elapsed = 0, walkPhase = 0, autoSaveT = 12;
 
 function show(id){ $(id).classList.remove('hidden'); }
 function hide(id){ $(id).classList.add('hidden'); }
@@ -2926,13 +3060,14 @@ $('opt-shadow').onchange = e => {
 };
 
 // pause
-function pauseGame(){ state='pause'; document.exitPointerLock?.(); show('pause'); }
+function pauseGame(){ state='pause'; document.exitPointerLock?.(); saveState(); show('pause'); }
 $('btn-resume').onclick = () => { hide('pause'); state='play'; canvas.requestPointerLock(); };
 $('btn-quit').onclick = () => backToMenu();
 $('btn-respawn').onclick = () => { hide('death'); respawn(); };
 $('btn-death-menu').onclick = () => { hide('death'); backToMenu(); };
 
 function backToMenu(){
+  saveState();   // keep progress so re-entering resumes where you were
   state='menu'; hide('hud'); hide('pause'); show('menu');
   document.exitPointerLock?.();
 }
@@ -2943,23 +3078,58 @@ function clearChunks(){
   chunks.forEach(c => chunkGroup.remove(c));
   chunks.clear();
 }
+// ---- save / restore (localStorage) so leaving via pause keeps place + items ----
+const SAVE_KEY = 'elderwood_save_v1';
+function saveState() {
+  if (!player.alive) return;
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      x: player.pos.x, z: player.pos.z, yaw: player.yaw,
+      hp: player.hp, hpMax: player.hpMax, staMax: player.staMax,
+      gold: player.gold, kills: player.kills, xp: player.xp, level: player.level, xpNext: player.xpNext,
+      owned: player.owned, wLevel: player.wLevel, weapon: player.weapon,
+      inv: inventory.map(s => ({ id: s.id, qty: s.qty, rarity: s.rarity })),
+      timeOfDay,
+    }));
+  } catch (e) {}
+}
+function loadState() {
+  try { const s = localStorage.getItem(SAVE_KEY); return s ? JSON.parse(s) : null; } catch (e) { return null; }
+}
+function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+addEventListener('beforeunload', saveState);
+
 function startGame(){
   initAudio();
   hide('menu'); show('loading');
   $('loader-fill').style.width = '5%';
   document.querySelector('#loading .loader-text').textContent = 'تُحمَّل النماذج والغابة…';
+  const save = loadState();
   // reset player
   Object.assign(player, { hp:100, hpMax:100, stamina:100, gold:0, kills:0, xp:0, level:1, xpNext:100, alive:true });
-  player.owned = [true, false, false, false, false, false, false];
-  player.weapon = 0;
+  player.owned = [true, true, false, false, false, false, false];   // free starter DAGGER
+  player.weapon = 1;
   player.wLevel = [0,0,0,0,0,0,0];
   inventory.length = 0;
   quest = null; renderQuestHUD();
   player.pos.set(0, terrainHeight(0,0)+player.height+2, 0);
   player.vel.set(0,0,0); player.yaw=0; player.pitch=0;
+  // restore a previous session (left via pause, not death)
+  if (save) {
+    player.pos.set(save.x, terrainHeight(save.x, save.z) + player.height + 2, save.z);
+    player.yaw = save.yaw ?? 0;
+    Object.assign(player, { hpMax: save.hpMax||100, hp: save.hp||save.hpMax||100, staMax: save.staMax||100,
+      gold: save.gold||0, kills: save.kills||0, xp: save.xp||0, level: save.level||1, xpNext: save.xpNext||100 });
+    if (Array.isArray(save.owned)) player.owned = save.owned;
+    if (Array.isArray(save.wLevel)) player.wLevel = save.wLevel;
+    player.weapon = save.weapon ?? 1;
+    (save.inv||[]).forEach(s => { if (ITEMS[s.id]) inventory.push({ ...ITEMS[s.id], qty: s.qty, rarity: s.rarity||'common' }); });
+    if (typeof save.timeOfDay === 'number') timeOfDay = save.timeOfDay;
+  }
   clearEntities();
   resetWeather();
-  selectWeapon(0);
+  if (save && typeof save.timeOfDay === 'number') timeOfDay = save.timeOfDay;
+  selectWeapon(player.owned[player.weapon] ? player.weapon : 1);
   refreshWeaponWheel();
   updateHUD();
   // load GLB models first, then (re)build the world so chunks use them
@@ -2978,7 +3148,7 @@ function startGame(){
 }
 function finishLoad(){
   hide('loading'); show('hud'); state='play';
-  objectiveText('لا تملك سلاحاً بعد — ابحث عن الأسلحة في اللوت أو اشترِها من القرى.');
+  objectiveText('استكشف الغابة، طوّر سلاحك، وأنجز مهام القرى… ثم واجه الدب الأسطوري.');
   // seed some wildlife + schedule the bear
   for (let i=0;i<6;i++) manageSpawns(999);
   bearSpawned = false;
@@ -3124,6 +3294,7 @@ function animate(){
   if (state === 'play'){
     elapsed += dt;
     timeUniform.value = elapsed;
+    waterUniforms.uTime.value = elapsed;
     updatePlayer(dt);
     // walk bob phase
     const moving = (keys['KeyW']||keys['KeyS']||keys['KeyA']||keys['KeyD']) && player.onGround;
@@ -3147,6 +3318,7 @@ function animate(){
     updateCampfires(dt);
     updateCrops(dt);
     gatherCd = Math.max(0, gatherCd - dt);
+    autoSaveT = (autoSaveT || 0) - dt; if (autoSaveT <= 0) { autoSaveT = 12; saveState(); }
     // vignette fade
     if (vigT > 0){ vigT -= dt; if (vigT <= 0) $('vignette').classList.remove('show'); }
     // village shop prompt
@@ -3186,6 +3358,7 @@ if (location.hash.includes('debug')) {
     villageHere: () => villages.push({ x: player.pos.x + 3, z: player.pos.z }),
     setWeather: (m) => { weather.timer = 999; Object.assign(weather, m); },
     spawn: (type = 'horse') => spawnEnemy(type, player.pos.x + 3, player.pos.z + 1),
+    spawnBand: () => spawnBanditGroup(player.pos.x + 6, player.pos.z + 6),
     setTime: (t) => { timeOfDay = t; },
     npcs, birds, shops, campfires,
     mount: () => toggleMount(),
