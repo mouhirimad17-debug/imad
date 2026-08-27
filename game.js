@@ -123,7 +123,7 @@ const WATER = 4.2;         // water surface height
 let   VIEW  = 5;           // chunk radius rendered (from settings)
 
 // Master height function — must match the terrain mesh exactly (used for collision).
-function terrainHeight(x, z) {
+function baseHeight(x, z) {
   // continent / mountain mass
   let e = fbm(x * 0.0016 + 42, z * 0.0016 - 17, 5, 2.1, 0.5); // 0..1
   e = Math.pow(e, 1.6);
@@ -141,6 +141,55 @@ function terrainHeight(x, z) {
   // desert dunes
   const dez = desertFactor(x, z);
   if (dez > 0) h += dez * (fbm(x * 0.02 + 900, z * 0.02 - 60, 2) - 0.4) * 9;
+  return h;
+}
+// a chunk carries a village iff this deterministic (hash-only) test passes AND
+// the underlying land is a suitable low-mid elevation — computed without the
+// flatten pass so there's no recursion.
+const VILLAGE_FLAT_R = 32, VILLAGE_FALLOFF = 14;   // flat core + smooth skirt
+const VILLAGE_POND_OFF = 17, VILLAGE_POND_R = 6, VILLAGE_POND_D = 1.6;  // small lake by each town
+function villageBase(cx, cz) {
+  if (hash2(cx + 999, cz - 999) <= 0.93) return null;
+  const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
+  if (desertFactor(mx, mz) > 0.5) return null;
+  const bh = baseHeight(mx, mz);
+  if (bh <= WATER + 3 || bh >= 24) return null;       // must be flattish low land
+  return { x: mx, z: mz, y: bh };
+}
+// a desert chunk carries an oasis basin iff this deterministic test passes
+const OASIS_R = 19, OASIS_DEPTH = 1.4;         // carved bowl: big & ~1m+ deep like a lake
+const OASIS_FLAT_R = 25, OASIS_FALLOFF = 10;   // flatten the surroundings so the water is level
+function oasisAt(cx, cz) {
+  const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
+  if (desertFactor(mx, mz) <= 0.5) return null;
+  if (hash2(cx - 333, cz + 333) <= 0.78) return null;
+  return { x: mx, z: mz, rimH: baseHeight(mx, mz) };
+}
+// terrain height with a flattened plateau under any village (houses sit level)
+// and a carved bowl under any oasis (water sits in a real basin, not on a disc)
+function terrainHeight(x, z) {
+  let h = baseHeight(x, z);
+  const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
+  const v = villageBase(cx, cz);
+  if (v) {
+    const d = Math.hypot(x - v.x, z - v.z);
+    if (d < VILLAGE_FLAT_R + VILLAGE_FALLOFF) {
+      const t = 1 - smooth(clamp((d - VILLAGE_FLAT_R) / VILLAGE_FALLOFF, 0, 1));
+      h = lerp(h, v.y, t);   // blend to the flat village level
+    }
+    // a small village pond, carved just off the main road (a lake by the town)
+    const pd = Math.hypot(x - (v.x + VILLAGE_POND_OFF), z - v.z);
+    if (pd < VILLAGE_POND_R) h -= VILLAGE_POND_D * smooth(clamp(1 - pd / VILLAGE_POND_R, 0, 1));
+  }
+  const o = oasisAt(cx, cz);
+  if (o) {
+    const d = Math.hypot(x - o.x, z - o.z);
+    if (d < OASIS_FLAT_R + OASIS_FALLOFF) {                 // level the ground around the lake
+      const t = 1 - smooth(clamp((d - OASIS_FLAT_R) / OASIS_FALLOFF, 0, 1));
+      h = lerp(h, o.rimH, t);
+    }
+    if (d < OASIS_R) h -= OASIS_DEPTH * smooth(clamp(1 - d / OASIS_R, 0, 1));  // dig the lake bed
+  }
   return h;
 }
 // desert region mask 0..1 (large-scale patch on the map)
@@ -186,7 +235,7 @@ function biomeColor(h, slope, dez, out) {
  * -------------------------------------------------------------------------- */
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));   // capped for weaker GPUs (raise via quality setting)
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -595,7 +644,8 @@ function buildScatter(cx, cz, group) {
   // ---- desert scatter: cacti + sandstone boulders (replaces grass/trees) ----
   if (isDesert) {
     // isolated oasis lake with palms — appears on some desert chunks
-    if (hash2(cx - 333, cz + 333) > 0.78 && terrainSlope(ox + CHUNK/2, oz + CHUNK/2) < 0.25) {
+    //   (condition matches oasisAt() so the carved basin lines up with the water)
+    if (hash2(cx - 333, cz + 333) > 0.78) {
       buildOasis(ox + CHUNK/2, oz + CHUNK/2, group, colliders);
     }
     const cN = ft === 2 ? 3 : 6;
@@ -759,6 +809,7 @@ function buildVillage(cx, cz, group, colliders) {
       if (ci === ROAD || ri === ROAD) continue;           // keep the central cross clear (roads + plaza)
       const x = cx + (ci * CELL - half);                  // aligned, no jitter
       const z = cz + (ri * CELL - half);
+      if (Math.hypot(x - (cx + VILLAGE_POND_OFF), z - cz) < VILLAGE_POND_R + 3) continue;  // keep the pond clear
       if (terrainHeight(x, z) < WATER + 1 || terrainSlope(x, z) > 0.4) continue;
       const edge = ci === 0 || ri === 0 || ci === COLS-1 || ri === ROWS-1;
       const makeShop = shopBudget > 0 && edge && r() < 0.3;
@@ -800,6 +851,26 @@ function buildVillage(cx, cz, group, colliders) {
   const dirt = new THREE.Mesh(new THREE.CircleGeometry(9, 20), MAT.dirt);
   dirt.rotation.x = -Math.PI/2; dirt.position.set(cx, hc + 0.02, cz); group.add(dirt);
 
+  // a small lake/pond just off the road (carved in terrainHeight above)
+  const px = cx + VILLAGE_POND_OFF, pz = cz, pWaterY = hc - 0.35;
+  const pondGeo = new THREE.CircleGeometry(VILLAGE_POND_R - 0.5, 40); pondGeo.rotateX(-Math.PI/2);
+  const pondM = new THREE.Mesh(pondGeo, waterMat);
+  pondM.position.set(px, pWaterY, pz); pondM.userData.isWater = true; group.add(pondM);
+  group.userData.hasWater = true;
+  group.userData.waterCenter = { x: px, z: pz, y: pWaterY, r: VILLAGE_POND_R - 2 };
+  // reeds around the village pond
+  const vReedGeo = new THREE.CylinderGeometry(0.03, 0.05, 1.2, 4); vReedGeo.translate(0, 0.6, 0);
+  const vReedIM = new THREE.InstancedMesh(vReedGeo, new THREE.MeshLambertMaterial({ color: 0x4f7a35 }), 18);
+  const _vm = new THREE.Matrix4(), _vq = new THREE.Quaternion(), _vv = new THREE.Vector3(), _vs = new THREE.Vector3(1,1,1);
+  let vrc = 0;
+  for (let i = 0; i < 18; i++) {
+    const a = r() * TAU, dd = VILLAGE_POND_R - 0.6 + r() * 1.1;
+    const wx = px + Math.cos(a) * dd, wz = pz + Math.sin(a) * dd;
+    _vm.compose(_vv.set(wx, terrainHeight(wx, wz), wz), _vq.setFromAxisAngle(_vv.set(0,1,0), r()*TAU), _vs);
+    vReedIM.setMatrixAt(vrc++, _vm);
+  }
+  vReedIM.count = vrc; vReedIM.instanceMatrix.needsUpdate = true; group.add(vReedIM);
+
   // many townsfolk (spread across the town)
   spawnTownNPCs(cx, cz, group, key, r);
 }
@@ -819,48 +890,80 @@ function makePalm() {
   return g;
 }
 
-// an isolated desert lake (oasis) with palms + shrubs around it
+// an isolated desert lake (oasis): a real carved basin of water (see terrainHeight)
+// ringed with grass, reeds, small trees and palms — and stocked with fish
 function buildOasis(cx, cz, group, colliders) {
   const r = rng(((cx*15485863) ^ (cz*32452843)) >>> 0);
-  const hc = terrainHeight(cx, cz);
-  const rad = 10 + r() * 5;
-  // animated water disc (shared water shader)
-  const pGeo = new THREE.CircleGeometry(rad, 48); pGeo.rotateX(-Math.PI/2);
+  const rimH = baseHeight(cx, cz);          // surrounding desert surface (before carving)
+  const waterY = rimH - 0.25;               // water sits ~1m above the carved bed → real depth
+  const rad = 15 + r() * 3;                 // big lake surface
+  // animated water surface (shared water shader), filling the carved bowl
+  const pGeo = new THREE.CircleGeometry(rad, 56); pGeo.rotateX(-Math.PI/2);
   const pond = new THREE.Mesh(pGeo, waterMat);
-  pond.position.set(cx, hc - 0.3, cz); pond.userData.isWater = true;
+  pond.position.set(cx, waterY, cz); pond.userData.isWater = true;
   group.add(pond);
   group.userData.oasis = { x: cx, z: cz, r: rad };
-  // damp sand ring
-  const ring = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 3, 40),
-    new THREE.MeshLambertMaterial({ color: 0x8a6a3a }));
-  ring.rotation.x = -Math.PI / 2; ring.position.set(cx, hc - 0.02, cz);
+  // let the fish system stock this lake too
+  group.userData.hasWater = true;
+  group.userData.waterCenter = { x: cx, z: cz, y: waterY, r: rad - 2 };
+  // damp grassy shore ring
+  const ring = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 4, 44),
+    new THREE.MeshLambertMaterial({ color: 0x6f8a44 }));
+  ring.rotation.x = -Math.PI / 2; ring.position.set(cx, waterY + 0.02, cz);
   group.add(ring);
-  // reeds/cattails around the shoreline
+  // grass tufts around the shoreline (instanced, cheap)
+  const bladeGeo = new THREE.ConeGeometry(0.13, 0.7, 4); bladeGeo.translate(0, 0.35, 0);
+  const grassMat = new THREE.MeshLambertMaterial({ color: 0x5f8a3a });
+  const nG = 60;
+  const grassIM = new THREE.InstancedMesh(bladeGeo, grassMat, nG);
+  const _gm = new THREE.Matrix4(), _gq = new THREE.Quaternion(), _gv = new THREE.Vector3(), _gs = new THREE.Vector3();
+  let gc = 0;
+  for (let i = 0; i < nG; i++) {
+    const a = r() * TAU, d = rad + 0.5 + r() * 5;
+    const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
+    _gs.set(0.8 + r()*0.6, 0.8 + r()*0.8, 0.8 + r()*0.6);
+    _gm.compose(_gv.set(x, terrainHeight(x, z), z), _gq.setFromAxisAngle(new THREE.Vector3(0,1,0), r()*TAU), _gs);
+    grassIM.setMatrixAt(gc++, _gm);
+  }
+  grassIM.count = gc; grassIM.instanceMatrix.needsUpdate = true; group.add(grassIM);
+  // reeds/cattails right at the water's edge
   const reedGeo = new THREE.CylinderGeometry(0.03, 0.05, 1.4, 4); reedGeo.translate(0, 0.7, 0);
   const reedMat = new THREE.MeshLambertMaterial({ color: 0x4f7a35 });
-  const nR = 30;
+  const nR = 34;
   const reedIM = new THREE.InstancedMesh(reedGeo, reedMat, nR);
   let rc = 0; const _rm = new THREE.Matrix4(), _rq = new THREE.Quaternion(), _rv = new THREE.Vector3(), _rs = new THREE.Vector3(1,1,1);
   for (let i = 0; i < nR; i++) {
-    const a = r() * TAU, d = rad + 0.3 + r() * 1.6;
+    const a = r() * TAU, d = rad - 0.6 + r() * 1.4;
     const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
     _rm.compose(_rv.set(x, terrainHeight(x, z), z), _rq.setFromAxisAngle(_rv.set(0,1,0), r()*TAU), _rs);
     reedIM.setMatrixAt(rc++, _rm);
   }
   reedIM.count = rc; reedIM.instanceMatrix.needsUpdate = true; reedIM.castShadow = true; group.add(reedIM);
-  // palms + shrubs around the shoreline
-  const nP = 5 + Math.floor(r() * 4);
+  // palms + small leafy trees around the shore
+  const nP = 6 + Math.floor(r() * 4);
   for (let i = 0; i < nP; i++) {
     const a = r() * TAU, d = rad + 1.5 + r() * 4;
     const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
     const h = terrainHeight(x, z);
-    const palm = makePalm(); palm.position.set(x, h, z); palm.scale.setScalar(0.8 + r() * 0.5);
-    group.add(palm);
-    colliders.push({ x, z, r: 0.4 });
+    if (r() < 0.5) {
+      const palm = makePalm(); palm.position.set(x, h, z); palm.scale.setScalar(0.8 + r() * 0.5);
+      group.add(palm);
+    } else {
+      // a small round tree (trunk + canopy)
+      const t = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 1.6, 6), MAT.trunk);
+      trunk.position.y = 0.8; trunk.castShadow = true;
+      const canopy = new THREE.Mesh(new THREE.SphereGeometry(1.1 + r()*0.5, 7, 6), MAT.bush);
+      canopy.position.y = 2.0; canopy.scale.y = 0.85; canopy.castShadow = true;
+      t.add(trunk, canopy); t.position.set(x, h, z); t.scale.setScalar(0.85 + r()*0.4);
+      group.add(t);
+    }
+    colliders.push({ x, z, r: 0.5 });
   }
+  // low shrubs further out
   const nB = 6 + Math.floor(r() * 6);
   for (let i = 0; i < nB; i++) {
-    const a = r() * TAU, d = rad + r() * 6;
+    const a = r() * TAU, d = rad + 3 + r() * 6;
     const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d;
     const h = terrainHeight(x, z);
     const bush = new THREE.Mesh(new THREE.SphereGeometry(0.5 + r() * 0.6, 6, 5), MAT.bush);
@@ -1326,7 +1429,34 @@ function attack() {
     damageEnemy(e, w.dmg * wMul(), to, w.knock);
     hitAny = true;
   }
+  // townsfolk can be struck too (they panic and flee, and can be killed)
+  for (const npc of npcs) {
+    if (npc.dead) continue;
+    const to = _s.set(npc.mesh.position.x - player.pos.x, 0, npc.mesh.position.z - player.pos.z);
+    const d = to.length();
+    if (d > w.range + 0.7) continue;
+    to.normalize();
+    if (fwd.dot(to) < 1 - w.arc) continue;
+    damageNPC(npc, w.dmg * wMul(), to, w.knock);
+    hitAny = true;
+  }
   if (hitAny) { flashCrosshair(); sfx('hit'); } else sfx('swing');
+}
+function damageNPC(npc, dmg, dir, knock) {
+  if (npc.dead) return;
+  npc.hp -= dmg;
+  npc.fleeT = 5;                                   // panic and run from the player
+  npc.mesh.position.addScaledVector(dir, (knock || 4) * 0.2);
+  spawnHitParticles(npc.mesh.position, npc.mesh.position.y + 1.4);
+  voiceBlip(npc);
+  if (npc.bubble) { npc.bubble.remove(); npc.bubble = null; }
+  if (npc.hp <= 0) {
+    npc.dead = true; npc.deathT = 0;
+    if (npc === talkNPC) { talkNPC = null; if (state === 'talk') { hide('dialogue'); state = 'play'; canvas.requestPointerLock?.(); } }
+    toast(`صرعت ${npc.name}`, '');
+    dropLoot(npc.mesh.position, 'basic');
+    const g = randi(5, 20); player.gold += g; updateHUD();
+  }
 }
 
 function updateWeaponAnim(dt) {
@@ -1741,9 +1871,17 @@ function walkAnim(e, speed, dt) {
   }
   const legs = e.mesh.userData.legs;
   if (!legs) return;
+  const gait = clamp(speed * 0.08, 0, 0.6);
   legs.forEach((leg, k) => {
-    leg.rotation.x = Math.sin(e.walkT + (k%2)*Math.PI) * clamp(speed*0.08, 0, 0.6);
+    leg.rotation.x = Math.sin(e.walkT + (k%2)*Math.PI) * gait;
   });
+  // subtle body bob + head bob synced to the gait, so walking reads as alive
+  if (speed > 0.1) {
+    const bob = Math.abs(Math.sin(e.walkT)) * clamp(speed*0.012, 0, 0.09);
+    e.mesh.position.y += bob;
+    const head = e.mesh.userData.head;
+    if (head) head.rotation.x = Math.sin(e.walkT*0.5) * 0.06;
+  }
 }
 
 // spawn management: keep some wildlife around the player
@@ -1783,10 +1921,20 @@ function manageSpawns(dt) {
         else if (r < 0.95) t = 'bandit';                                         // roadside bandits
         else t = mounts < 3 ? 'horse' : 'deer';                                  // keep horses around
       }
+      // predators & bandits must never lurk near a village — villagers are safe
+      const PREDATORS = { wolf:1, boar:1, bandit:1, snake:1, scorpion:1 };
+      if (PREDATORS[t] && nearVillage(x, z, 85)) {
+        t = desert ? 'rabbit' : (r < 0.5 ? 'deer' : 'rabbit');   // peaceful instead
+      }
       if (t === 'bandit') spawnBanditGroup(x, z);   // raiders travel in bands
       else spawnEnemy(t, x, z);
     }
   }
+}
+// is (x,z) within `dist` of any known village centre?
+function nearVillage(x, z, dist) {
+  for (const v of villages) if (Math.hypot(v.x - x, v.z - z) < dist) return true;
+  return false;
 }
 
 /* ----------------------------------------------------------------------------
@@ -1799,12 +1947,14 @@ function spawnFishNearWater() {
     if (c.userData.hasWater && fish.length < 30) {
       const wc = c.userData.waterCenter;
       if (Math.hypot(wc.x - player.pos.x, wc.z - player.pos.z) < CHUNK * 2) {
+        const wy = wc.y ?? WATER;                 // oases sit at their own level
+        const spread = wc.r ?? 20;
         for (let i = 0; i < 3 && fish.length < 30; i++) {
           const m = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.5, 4), MAT.fish);
           m.rotation.z = Math.PI/2;
-          m.position.set(wc.x + rand(20,-20), WATER - 0.3, wc.z + rand(20,-20));
+          m.position.set(wc.x + rand(spread,-spread), wy - 0.3, wc.z + rand(spread,-spread));
           scene.add(m);
-          fish.push({ mesh: m, ang: rand(TAU), cx: wc.x, cz: wc.z, r: rand(16,4), sp: rand(1.4,0.5), home: wc });
+          fish.push({ mesh: m, ang: rand(TAU), cx: wc.x, cz: wc.z, r: rand(Math.min(16,spread*0.8),4), sp: rand(1.4,0.5), home: wc, wy });
         }
       }
     }
@@ -1819,7 +1969,7 @@ function updateFish(dt) {
     f.ang += dt * f.sp * 0.5;
     f.mesh.position.x = f.cx + Math.cos(f.ang) * f.r;
     f.mesh.position.z = f.cz + Math.sin(f.ang) * f.r;
-    f.mesh.position.y = WATER - 0.25 + Math.sin(f.ang*3) * 0.1;
+    f.mesh.position.y = (f.wy ?? WATER) - 0.25 + Math.sin(f.ang*3) * 0.1;
     f.mesh.rotation.y = -f.ang + Math.PI/2;
     if (Math.hypot(f.home.x - player.pos.x, f.home.z - player.pos.z) > CHUNK * 3) {
       scene.remove(f.mesh); fish.splice(i,1);
@@ -2321,7 +2471,6 @@ function updatePrompt() {
   else if (nearCrop()) set('F', 'حصاد المحصول 🍅');
   else if (nearProductAnimal()) set('F', nearProductAnimal().type === 'chicken' ? 'جمع البيض 🥚' : 'حلب البقرة 🥛');
   else if (nearLitFire()) set('C', 'الطهي على النار');
-  else if (invCount('stick') >= 2) set('C', 'إشعال نار (عودان)');
   else if (nearTreeForSticks()) set('F', 'جمع الأعواد');
   else if (WEAPONS[player.weapon].canFish && isNearWater()) set('زر أيسر', 'صيد السمك بالرمح');
   else p.classList.add('hidden');
@@ -2494,20 +2643,28 @@ function updateDayNight(dt) {
  * 9g. Ambient life — birds, insects
  * -------------------------------------------------------------------------- */
 const birds = [];
+// a slender swept wing that lies flat (reads as a gliding bird, not a square)
+function birdWingGeo() {
+  const s = new THREE.Shape();
+  s.moveTo(0, 0); s.lineTo(0.95, -0.1); s.lineTo(0.55, 0.06); s.lineTo(0.22, 0.24); s.lineTo(0, 0.05);
+  const geo = new THREE.ShapeGeometry(s); geo.rotateX(-Math.PI / 2);   // lie flat in XZ
+  return geo;
+}
+const _birdWing = null;
 function makeBird() {
   const g = new THREE.Group();
-  const wingGeo = new THREE.PlaneGeometry(0.9, 0.4);
-  const lw = new THREE.Mesh(wingGeo, MAT.bird); lw.position.x = -0.45;
-  const rw = new THREE.Mesh(wingGeo, MAT.bird); rw.position.x = 0.45;
-  g.add(lw, rw); g.userData.lw = lw; g.userData.rw = rw;
+  const wg = birdWingGeo();
+  const lw = new THREE.Mesh(wg, MAT.bird); lw.scale.x = -1;   // mirror wing to the left
+  const rw = new THREE.Mesh(wg, MAT.bird);
+  const body = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.5, 5), MAT.bird);
+  body.rotation.x = -Math.PI / 2;                            // slim body along travel
+  g.add(lw, rw, body); g.userData.lw = lw; g.userData.rw = rw;
   return g;
 }
 function initBirds() {
-  for (let i = 0; i < 7; i++) {
-    const m = makeBird(); m.frustumCulled = false; scene.add(m);
-    birds.push({ mesh: m, ang: rand(TAU), r: rand(45, 18), h: rand(34, 20), sp: rand(0.5, 0.25), flap: rand(TAU),
-                 cx: 0, cz: 0 });
-  }
+  // Birds are intentionally not spawned as meshes: at distance the tiny wings
+  // read as stray squares against the sky. We keep only their ambient chirps
+  // (played in updateBirds) so the forest still sounds alive.
 }
 function updateBirds(dt) {
   for (const b of birds) {
@@ -2625,7 +2782,8 @@ function spawnTownNPCs(cx, cz, group, key, r) {
     group.add(mesh);
     npcs.push({ mesh, key, name: NPC_NAMES[Math.floor(r()*NPC_NAMES.length)],
                 homeX: x, homeZ: z, talkT: rand(12, 2), sayUntil: 0, bubble: null,
-                wanderT: rand(4), wanderDir: rand(TAU), walkT: 0, pendingReply: null });
+                wanderT: rand(4), wanderDir: rand(TAU), walkT: 0, pendingReply: null,
+                hp: 60, hpMax: 60, fleeT: 0, dead: false, deathT: 0 });
   }
 }
 function removeNpcsOfChunk(key) {
@@ -2645,26 +2803,59 @@ function npcSay(npc, line, dur = 3.6) {
   npc.sayUntil = elapsed + dur;
 }
 const _np = new THREE.Vector3();
+// keep an NPC from walking through houses: push out of any solid collider nearby
+function resolveNpcColliders(npc) {
+  const chunk = chunks.get(npc.key);
+  const cols = chunk && chunk.userData.colliders;
+  if (!cols) return;
+  const p = npc.mesh.position;
+  for (const c of cols) {
+    const dx = p.x - c.x, dz = p.z - c.z, rr = c.r + 0.4;
+    const d2 = dx*dx + dz*dz;
+    if (d2 < rr*rr && d2 > 1e-4) {
+      const d = Math.sqrt(d2), push = (rr - d);
+      p.x += (dx / d) * push; p.z += (dz / d) * push;
+    }
+  }
+}
 function updateNPCs(dt) {
   camera.updateMatrixWorld();
-  for (const npc of npcs) {
+  for (let i = npcs.length - 1; i >= 0; i--) {
+    const npc = npcs[i];
+    // death: topple, sink, then remove from the world
+    if (npc.dead) {
+      npc.deathT += dt;
+      npc.mesh.rotation.z = lerp(npc.mesh.rotation.z, Math.PI/2, dt*4);
+      npc.mesh.position.y = lerp(npc.mesh.position.y, terrainHeight(npc.mesh.position.x, npc.mesh.position.z) - 0.6, dt*2);
+      if (npc.deathT > 3.5) { if (npc.bubble) npc.bubble.remove(); npc.mesh.removeFromParent(); npcs.splice(i, 1); }
+      continue;
+    }
     // NPCs far from the player pause (perf) but still hold their pose
     const far = Math.hypot(npc.mesh.position.x - player.pos.x, npc.mesh.position.z - player.pos.z);
     if (far > 90) { if (npc.bubble) { npc.bubble.style.display = 'none'; } continue; }
-    // gentle wander near home; pause while talking to the player or a neighbour
     const talking = elapsed < npc.sayUntil;
-    npc.wanderT -= dt;
-    if (npc.wanderT <= 0) { npc.wanderT = rand(5, 2); npc.wanderDir = rand(TAU); npc.pause = rand() < 0.4; }
     let moving = false;
-    if (!talking && !npc.pause && npc !== talkNPC) {
-      const nx = npc.mesh.position.x + Math.cos(npc.wanderDir) * 0.7 * dt;
-      const nz = npc.mesh.position.z + Math.sin(npc.wanderDir) * 0.7 * dt;
-      if (Math.hypot(nx - npc.homeX, nz - npc.homeZ) < 9) {
-        npc.mesh.position.x = nx; npc.mesh.position.z = nz;
-        npc.mesh.rotation.y = Math.atan2(Math.cos(npc.wanderDir), Math.sin(npc.wanderDir));
-        moving = true;
+    if (npc.fleeT > 0) {                                    // panic: run from the player
+      npc.fleeT -= dt;
+      const away = Math.atan2(npc.mesh.position.x - player.pos.x, npc.mesh.position.z - player.pos.z);
+      npc.mesh.position.x += Math.sin(away) * 3.4 * dt;
+      npc.mesh.position.z += Math.cos(away) * 3.4 * dt;
+      npc.mesh.rotation.y = away;
+      moving = true;
+    } else {                                                // gentle wander near home
+      npc.wanderT -= dt;
+      if (npc.wanderT <= 0) { npc.wanderT = rand(5, 2); npc.wanderDir = rand(TAU); npc.pause = rand() < 0.4; }
+      if (!talking && !npc.pause && npc !== talkNPC) {
+        const nx = npc.mesh.position.x + Math.cos(npc.wanderDir) * 0.7 * dt;
+        const nz = npc.mesh.position.z + Math.sin(npc.wanderDir) * 0.7 * dt;
+        if (Math.hypot(nx - npc.homeX, nz - npc.homeZ) < 9) {
+          npc.mesh.position.x = nx; npc.mesh.position.z = nz;
+          npc.mesh.rotation.y = Math.atan2(Math.cos(npc.wanderDir), Math.sin(npc.wanderDir));
+          moving = true;
+        }
       }
     }
+    resolveNpcColliders(npc);                               // don't pass through houses
     npc.mesh.position.y = terrainHeight(npc.mesh.position.x, npc.mesh.position.z) + 0.04;  // feet rest on ground (not sunk)
     // character animation: walk / idle / talk gesture
     npc.walkT = (npc.walkT || 0) + dt * (moving ? 8 : 2);
@@ -2759,6 +2950,7 @@ function updateParticles(dt) {
 let hurtCd = 0;
 function hurtPlayer(dmg) {
   if (!player.alive) return;
+  dmg = Math.min(dmg, 20);                 // a single hit never takes more than 20
   player.hp = clamp(player.hp - dmg, 0, player.hpMax);
   showVignette();
   sfx('hurt');
@@ -3058,6 +3250,19 @@ $('opt-shadow').onchange = e => {
   sun.shadow.mapSize.set(q>=2?4096:2048, q>=2?4096:2048);
   sun.castShadow = q > 0;
 };
+// overall graphics quality preset — the key lever for weak computers
+function applyQuality(q) {
+  const pr = q === 0 ? 1 : q === 1 ? 1.5 : 2;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, pr));
+  composer.setSize(innerWidth, innerHeight);
+  bloom.enabled = q > 0;                       // skip post-bloom on low
+  bloom.strength = q >= 2 ? 0.45 : 0.32;
+  if (q === 0) {                               // weak-PC preset: trim view + shadows too
+    VIEW = 3; scene.fog.far = CHUNK * (VIEW + 0.6);
+    renderer.shadowMap.enabled = false; sun.castShadow = false;
+  }
+}
+$('opt-quality').onchange = e => applyQuality(+e.target.value);
 
 // pause
 function pauseGame(){ state='pause'; document.exitPointerLock?.(); saveState(); show('pause'); }
@@ -3182,9 +3387,13 @@ function maybeSpawnBear(dt){
   bearTimer -= dt;
   if (bearTimer <= 0 || player.kills >= 8) {
     bearSpawned = true;
-    const a = rand(TAU), d = 70;
-    let x = player.pos.x + Math.cos(a)*d, z = player.pos.z + Math.sin(a)*d;
-    // find non-water ground
+    // pick a spot well away from the player AND far from any village
+    let x, z, a, d = 120;
+    for (let tries = 0; tries < 16; tries++) {
+      a = rand(TAU); d = rand(150, 110);
+      x = player.pos.x + Math.cos(a)*d; z = player.pos.z + Math.sin(a)*d;
+      if (terrainHeight(x, z) > WATER + 1 && !nearVillage(x, z, 160)) break;
+    }
     for (let i=0;i<10 && terrainHeight(x,z)<WATER+1;i++){ x+=10; z+=6; }
     spawnEnemy('bear', x, z);
     objectiveText('الدب الأسطوري (المستوى 100) ظهر! اهزمه — يتقلص كلما أصبته.');
@@ -3376,6 +3585,10 @@ if (location.hash.includes('debug')) {
     findFarm: () => { for (let cx=-70; cx<70; cx++) for (let cz=-70; cz<70; cz++) { if (hash2(cx+555,cz-555) > 0.9) { const ox=cx*CHUNK+CHUNK/2, oz=cz*CHUNK+CHUNK/2; const h=terrainHeight(ox,oz); if (desertFactor(ox,oz)<=0.5 && hash2(cx+999,cz-999)<=0.93 && h>WATER+2 && h<22 && terrainSlope(ox,oz)<0.26) return {x:ox,z:oz}; } } return null; },
     visibleChunks: () => { let v=0,t=0; chunks.forEach(c=>{t++; if(c.visible)v++;}); return {visible:v,total:t}; },
     openInventory,
+    th: (x, z) => terrainHeight(x, z), hurt: (d) => hurtPlayer(d), attack: () => attack(),
+    findOasis: () => { const t = _DBGfindDesert(); return t; },
+    quality: (q) => applyQuality(q),
   };
+  function _DBGfindDesert(){ for (let cx=-90; cx<90; cx++) for (let cz=-90; cz<90; cz++) { if (desertFactor(cx*CHUNK+CHUNK/2,cz*CHUNK+CHUNK/2)>0.5 && hash2(cx-333,cz+333)>0.78) return {x:cx*CHUNK+CHUNK/2, z:cz*CHUNK+CHUNK/2}; } return null; }
   function isDesert2(cx,cz){ return desertFactor(cx*CHUNK+CHUNK/2, cz*CHUNK+CHUNK/2) > 0.5; }
 }
